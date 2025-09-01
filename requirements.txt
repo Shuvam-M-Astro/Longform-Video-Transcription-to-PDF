@@ -1,0 +1,11 @@
+yt-dlp==2024.8.6
+faster-whisper==1.0.1
+opencv-python==4.10.0.84
+numpy==1.26.4
+easyocr==1.7.1
+Pillow==10.4.0
+reportlab==4.2.2
+ffmpeg-python==0.2.0
+tqdm==4.66.5
+torch
+torchvision
