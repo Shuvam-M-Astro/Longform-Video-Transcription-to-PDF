@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Callable
 
 import cv2
 import numpy as np
@@ -58,6 +58,8 @@ def classify_frames(
     frame_paths: List[Path],
     classified_root: Path,
     snippets_dir: Path,
+    *,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> Dict[str, List[Path]]:
     classified_root = Path(classified_root)
     (classified_root / "code").mkdir(parents=True, exist_ok=True)
@@ -78,6 +80,7 @@ def classify_frames(
 
     result: Dict[str, List[Path]] = {"code": [], "plots": [], "images": []}
 
+    total = len(frame_paths) if frame_paths else 0
     for idx, frame_path in enumerate(tqdm(frame_paths, desc="Classifying", unit="frame", leave=False)):
         ocr_result = reader.readtext(str(frame_path), detail=1, paragraph=True)
         texts = [entry[1] for entry in ocr_result if isinstance(entry, (list, tuple)) and len(entry) >= 2]
@@ -102,4 +105,10 @@ def classify_frames(
             shutil.copy2(frame_path, target)
             result["images"].append(target)
 
+        if progress_cb and total:
+            pct = max(0.0, min(100.0, ((idx + 1) / total) * 100.0))
+            progress_cb(pct)
+
+    if progress_cb:
+        progress_cb(100.0)
     return result

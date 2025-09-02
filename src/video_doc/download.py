@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Callable
 
 from yt_dlp import YoutubeDL
 
@@ -33,6 +33,7 @@ def download_video(
     browser_profile: Optional[str] = None,
     cookies_file: Optional[Path] = None,
     use_android_client: bool = False,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> Path:
     """
     Download a video from the given URL to the specified MP4 path.
@@ -69,6 +70,25 @@ def download_video(
     if cookies_file:
         ydl_opts["cookiefile"] = str(cookies_file)
 
+    def _hook(d: Dict[str, Any]) -> None:
+        if not progress_cb:
+            return
+        try:
+            if d.get('status') == 'downloading':
+                # Estimate 0-90% for download; postprocessing 90-100
+                total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                downloaded = d.get('downloaded_bytes') or 0
+                if total:
+                    pct = max(0.0, min(100.0, float(downloaded) / float(total) * 90.0))
+                    progress_cb(pct)
+            elif d.get('status') == 'finished':
+                progress_cb(95.0)
+        except Exception:
+            pass
+
+    if progress_cb:
+        ydl_opts['progress_hooks'] = [_hook]
+
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
@@ -90,4 +110,6 @@ def download_video(
     if final_candidate != output_path:
         final_candidate.replace(output_path)
 
+    if progress_cb:
+        progress_cb(100.0)
     return output_path

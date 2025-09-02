@@ -16,6 +16,7 @@ from src.video_doc.stream import (
     fallback_download_audio_via_ytdlp,
     fallback_download_small_video,
 )
+from src.video_doc.progress import PipelineProgress, make_console_progress_printer
 
 
 def ensure_dirs(output_dir: Path) -> None:
@@ -64,6 +65,13 @@ def main() -> None:
 
     print(f"Mode: {'streaming' if args.streaming else 'download'}; transcribe_only={args.transcribe_only}", flush=True)
 
+    # Overall pipeline progress (weights roughly proportional to average time)
+    # Download 20, Audio 10, Frames 20, Transcribe 40, Classify 5, PDF 5
+    progress = PipelineProgress(
+        total_weight=100.0,
+        on_change=make_console_progress_printer(),
+    )
+
     keyframe_paths = []
 
     if args.streaming:
@@ -80,10 +88,13 @@ def main() -> None:
             if not resolved.get("audio_url"):
                 raise RuntimeError("No audio_url")
             print("Extracting audio from stream...", flush=True)
-            stream_extract_audio(resolved["audio_url"], audio_path, headers=resolved.get("headers"))
+            progress.start_step("Audio (stream)", 10)
+            stream_extract_audio(resolved["audio_url"], audio_path, headers=resolved.get("headers"), progress_cb=lambda p: progress.update(p))
+            progress.end_step()
             print(f"Audio saved: {audio_path}", flush=True)
         except Exception:
             print("Stream audio failed; falling back to yt-dlp audio-only...", flush=True)
+            progress.start_step("Audio fallback download", 10)
             audio_path = fallback_download_audio_via_ytdlp(
                 args.url,
                 audio_path,
@@ -92,6 +103,7 @@ def main() -> None:
                 cookies_file=Path(args.cookies_file) if args.cookies_file else None,
                 use_android_client=args.use_android_client,
             )
+            progress.end_step()
             print(f"Audio saved (fallback): {audio_path}", flush=True)
         # Frames (skip if transcribe-only)
         if not args.transcribe_only:
@@ -99,18 +111,22 @@ def main() -> None:
                 if not resolved.get("video_url"):
                     raise RuntimeError("No video_url")
                 print("Extracting keyframes from stream...", flush=True)
+                progress.start_step("Keyframes (stream)", 20)
                 stream_extract_keyframes(
                     resolved["video_url"],
                     frames_dir,
                     max_fps=args.max_fps,
                     scene_threshold=args.min_scene_diff,
                     headers=resolved.get("headers"),
+                    progress_cb=lambda p: progress.update(p),
                 )
+                progress.end_step()
                 keyframe_paths = sorted(frames_dir.glob("frame_*.jpg"))
                 print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
             except Exception:
                 print("Stream keyframes failed; downloading tiny MP4 for keyframes...", flush=True)
                 small_video = output_dir / "video_small.mp4"
+                progress.start_step("Download tiny video", 10)
                 fallback_download_small_video(
                     args.url,
                     small_video,
@@ -119,7 +135,9 @@ def main() -> None:
                     cookies_file=Path(args.cookies_file) if args.cookies_file else None,
                     use_android_client=args.use_android_client,
                 )
+                progress.end_step()
                 print("Extracting keyframes from tiny MP4...", flush=True)
+                progress.start_step("Keyframes (tiny)", 20)
                 keyframe_paths = extract_keyframes(
                     video_path=small_video,
                     output_dir=frames_dir,
@@ -127,11 +145,14 @@ def main() -> None:
                     scene_threshold=args.min_scene_diff,
                     method=args.kf_method,
                     interval_sec=args.kf_interval_sec,
+                    progress_cb=lambda p: progress.update(p),
                 )
+                progress.end_step()
                 print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
     else:
         if not args.skip_download or not video_path.exists():
             print("Downloading full video (mp4)...", flush=True)
+            progress.start_step("Download video", 20)
             download_video(
                 args.url,
                 video_path,
@@ -139,9 +160,13 @@ def main() -> None:
                 browser_profile=args.browser_profile,
                 cookies_file=Path(args.cookies_file) if args.cookies_file else None,
                 use_android_client=args.use_android_client,
+                progress_cb=lambda p: progress.update(p),
             )
+            progress.end_step()
         print("Extracting audio from file...", flush=True)
-        extract_audio_wav(video_path, audio_path)
+        progress.start_step("Extract audio", 10)
+        extract_audio_wav(video_path, audio_path, progress_cb=lambda p: progress.update(p))
+        progress.end_step()
         print(f"Audio saved: {audio_path}", flush=True)
         if not args.transcribe_only:
             print("Extracting keyframes from file...", flush=True)
@@ -150,6 +175,7 @@ def main() -> None:
                 f"min_scene_diff={args.min_scene_diff} interval_sec={args.kf_interval_sec}",
                 flush=True,
             )
+            progress.start_step("Keyframes", 20)
             keyframe_paths = extract_keyframes(
                 video_path=video_path,
                 output_dir=frames_dir,
@@ -157,12 +183,15 @@ def main() -> None:
                 scene_threshold=args.min_scene_diff,
                 method=args.kf_method,
                 interval_sec=args.kf_interval_sec,
+                progress_cb=lambda p: progress.update(p),
             )
+            progress.end_step()
             print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
 
     transcript_txt = transcript_dir / "transcript.txt"
     segments_json = transcript_dir / "segments.json"
     print(f"Transcribing audio with model={args.whisper_model}, beam_size={args.beam_size}...", flush=True)
+    progress.start_step("Transcribe", 40)
     segments = transcribe_audio(
         audio_path=audio_path,
         transcript_txt_path=transcript_txt,
@@ -170,18 +199,23 @@ def main() -> None:
         language=args.language,
         beam_size=args.beam_size,
         model_size=args.whisper_model,
+        progress_cb=lambda p: progress.update(p),
     )
+    progress.end_step()
     print(f"Transcription done: {len(segments)} segments", flush=True)
 
     if args.transcribe_only:
         classification_result = {"code": [], "plots": [], "images": []}
     else:
         print("Classifying frames...", flush=True)
+        progress.start_step("Classify frames", 5)
         classification_result = classify_frames(
             frame_paths=keyframe_paths,
             classified_root=classified_dir,
             snippets_dir=snippets_dir,
+            progress_cb=lambda p: progress.update(p),
         )
+        progress.end_step()
         print(
             f"Classified - code: {len(classification_result.get('code', []))}, "
             f"plots: {len(classification_result.get('plots', []))}, "
@@ -190,6 +224,7 @@ def main() -> None:
         )
 
     print("Building PDF report...", flush=True)
+    progress.start_step("Build PDF", 5)
     report_pdf_path = output_dir / "report.pdf"
     build_pdf_report(
         output_pdf_path=report_pdf_path,
@@ -197,7 +232,9 @@ def main() -> None:
         segments_json_path=segments_json,
         classification_result=classification_result,
         output_dir=output_dir,
+        progress_cb=lambda p: progress.update(p),
     )
+    progress.end_step()
     print(f"Report ready: {report_pdf_path}", flush=True)
 
     print(json.dumps({

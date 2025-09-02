@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Callable
 
 import ffmpeg
 from yt_dlp import YoutubeDL
@@ -97,21 +97,59 @@ def resolve_stream_urls(
     }
 
 
-def stream_extract_audio(audio_url: str, audio_path: Path, headers: Optional[str] = None) -> Path:
+def stream_extract_audio(audio_url: str, audio_path: Path, headers: Optional[str] = None, *, progress_cb: Optional[Callable[[float], None]] = None) -> Path:
     audio_path = Path(audio_path)
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     inp = ffmpeg.input(audio_url, user_agent=_DEFAULT_UA, headers=headers) if headers else ffmpeg.input(audio_url, user_agent=_DEFAULT_UA)
-    (
-        inp
-        .output(
-            str(audio_path),
-            ac=1,
-            ar=16000,
-            format="wav",
+    try:
+        stream = (
+            inp
+            .output(
+                str(audio_path),
+                ac=1,
+                ar=16000,
+                format="wav",
+            )
+            .overwrite_output()
+            .global_args("-progress", "pipe:1", "-nostats")
         )
-        .overwrite_output()
-        .run(quiet=True)
-    )
+        process = stream.run_async(pipe_stdout=True, pipe_stderr=False)
+        if progress_cb:
+            import re
+            out_time_regex = re.compile(rb"out_time_ms=(\d+)")
+            last = 0
+            try:
+                while True:
+                    line = process.stdout.readline()
+                    if not line:
+                        break
+                    m = out_time_regex.search(line)
+                    if m:
+                        ms = int(m.group(1))
+                        secs = int(ms / 1_000_000)
+                        if secs > last:
+                            # No total; just emit increasing ticks up to 100
+                            pct = min(100.0, float(secs % 100))
+                            progress_cb(pct)
+                            last = secs
+            finally:
+                process.wait()
+        else:
+            process.communicate()
+    except Exception:
+        (
+            inp
+            .output(
+                str(audio_path),
+                ac=1,
+                ar=16000,
+                format="wav",
+            )
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    if progress_cb:
+        progress_cb(100.0)
     return audio_path
 
 
@@ -216,6 +254,8 @@ def stream_extract_keyframes(
     max_fps: float = 1.0,
     scene_threshold: float = 0.45,
     headers: Optional[str] = None,
+    *,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -254,6 +294,8 @@ def stream_extract_keyframes(
                     if frames > last_n:
                         bar.update(frames - last_n)
                         last_n = frames
+                        if progress_cb:
+                            progress_cb(min(100.0, float(frames % 100)))
                     continue
                 m2 = out_time_regex.search(line)
                 if m2:
@@ -263,9 +305,13 @@ def stream_extract_keyframes(
                     if secs > last_n:
                         bar.update(secs - last_n)
                         last_n = secs
+                        if progress_cb:
+                            progress_cb(min(100.0, float(secs % 100)))
         finally:
             process.wait()
             bar.close()
+            if progress_cb:
+                progress_cb(100.0)
     except Exception:
         (
             inp

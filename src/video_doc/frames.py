@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Callable
 
 import ffmpeg
 import cv2
@@ -37,6 +37,8 @@ def extract_keyframes_ffmpeg(
     scene_threshold: float = 0.45,
     method: str = "scene",  # scene | iframe | interval
     interval_sec: float = 5.0,
+    *,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> List[Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +90,9 @@ def extract_keyframes_ffmpeg(
                         current = progress_bar.n
                         if secs > current:
                             progress_bar.update(secs - current)
+                            if progress_cb and total_seconds > 0:
+                                pct = max(0.0, min(100.0, (secs / total_seconds) * 100.0))
+                                progress_cb(pct)
         finally:
             process.wait()
             if progress_bar is not None:
@@ -95,6 +100,8 @@ def extract_keyframes_ffmpeg(
                 if progress_bar.n < progress_bar.total:
                     progress_bar.update(progress_bar.total - progress_bar.n)
                 progress_bar.close()
+            if progress_cb:
+                progress_cb(100.0)
     except Exception:
         (
             ffmpeg
@@ -135,6 +142,8 @@ def extract_keyframes_opencv(
     scene_threshold: float = 0.45,
     method: str = "scene",
     interval_sec: float = 5.0,
+    *,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> List[Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -170,9 +179,14 @@ def extract_keyframes_opencv(
                     saved_paths.append(out_path)
                     keyframe_idx += 1
                     bar.update(1)
+                    if progress_cb and expected:
+                        pct = max(0.0, min(100.0, (bar.n / expected) * 100.0))
+                        progress_cb(pct)
             frame_idx += 1
         cap.release()
         bar.close()
+        if progress_cb:
+            progress_cb(100.0)
         return saved_paths
 
     # Default to scene detection for OpenCV path
@@ -214,9 +228,14 @@ def extract_keyframes_opencv(
         frame_idx += 1
         if expected is not None:
             bar.update(1)
+            if progress_cb and expected:
+                pct = max(0.0, min(100.0, (bar.n / expected) * 100.0))
+                progress_cb(pct)
 
     cap.release()
     bar.close()
+    if progress_cb:
+        progress_cb(100.0)
     return saved_paths
 
 
@@ -227,6 +246,8 @@ def extract_keyframes(
     scene_threshold: float = 0.45,
     method: str = "scene",
     interval_sec: float = 5.0,
+    *,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> List[Path]:
     try:
         return extract_keyframes_ffmpeg(
@@ -236,6 +257,7 @@ def extract_keyframes(
             scene_threshold=scene_threshold,
             method=method,
             interval_sec=interval_sec,
+            progress_cb=progress_cb,
         )
     except Exception:
         return extract_keyframes_opencv(
@@ -245,4 +267,5 @@ def extract_keyframes(
             scene_threshold=scene_threshold,
             method=method,
             interval_sec=interval_sec,
+            progress_cb=progress_cb,
         )

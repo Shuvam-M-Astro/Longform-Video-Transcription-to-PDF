@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Callable
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -36,6 +36,8 @@ def build_pdf_report(
     segments_json_path: Path,
     classification_result: Dict[str, List[Path]],
     output_dir: Path,
+    *,
+    progress_cb: Optional[Callable[[float], None]] = None,
 ) -> Path:
     output_pdf_path = Path(output_pdf_path)
     output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,5 +90,9 @@ def build_pdf_report(
     flow.append(PageBreak())
     _add_images(flow, "Images", classification_result.get("images", []), max_img_width)
 
+    if progress_cb:
+        progress_cb(50.0)
     doc.build(flow)
+    if progress_cb:
+        progress_cb(100.0)
     return output_pdf_path
