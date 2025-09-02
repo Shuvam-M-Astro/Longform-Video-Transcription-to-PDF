@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import shutil
 import easyocr
+from tqdm import tqdm
 
 
 _CODE_TOKENS = {
@@ -77,7 +78,7 @@ def classify_frames(
 
     result: Dict[str, List[Path]] = {"code": [], "plots": [], "images": []}
 
-    for idx, frame_path in enumerate(frame_paths):
+    for idx, frame_path in enumerate(tqdm(frame_paths, desc="Classifying", unit="frame", leave=False)):
         ocr_result = reader.readtext(str(frame_path), detail=1, paragraph=True)
         texts = [entry[1] for entry in ocr_result if isinstance(entry, (list, tuple)) and len(entry) >= 2]
         text = "\n".join(t.strip() for t in texts if t and t.strip())

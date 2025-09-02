@@ -6,6 +6,28 @@ from typing import List
 import ffmpeg
 import cv2
 import numpy as np
+from tqdm import tqdm
+import re
+
+
+def _probe_duration_seconds(video_path: Path) -> float | None:
+    try:
+        info = ffmpeg.probe(str(video_path))
+        if not info:
+            return None
+        streams = info.get("streams", [])
+        for stream in streams:
+            if stream.get("codec_type") == "video":
+                # duration may be on format or stream
+                dur = stream.get("duration")
+                if dur is not None:
+                    return float(dur)
+        fmt = info.get("format", {})
+        if "duration" in fmt:
+            return float(fmt["duration"])
+    except Exception:
+        return None
+    return None
 
 
 def extract_keyframes_ffmpeg(
@@ -29,18 +51,63 @@ def extract_keyframes_ffmpeg(
 
     pattern = str(output_dir / "frame_%06d.jpg")
 
-    (
-        ffmpeg
-        .input(str(video_path))
-        .output(
-            pattern,
-            vf=vf,
-            vsync="vfr",
-            **{"qscale:v": 2},
+    # Try live-progress run; if anything fails, fallback to quiet run
+    try:
+        total_seconds = _probe_duration_seconds(video_path) or 0.0
+        stream = (
+            ffmpeg
+            .input(str(video_path))
+            .output(
+                pattern,
+                vf=vf,
+                vsync="vfr",
+                **{"qscale:v": 2},
+            )
+            .overwrite_output()
+            .global_args("-progress", "pipe:1", "-nostats")
         )
-        .overwrite_output()
-        .run(quiet=True)
-    )
+
+        process = stream.run_async(pipe_stdout=True, pipe_stderr=False)
+
+        progress_bar = None
+        if total_seconds > 0:
+            progress_bar = tqdm(total=total_seconds, unit="s", desc="Keyframes", leave=False)
+
+        out_time_regex = re.compile(rb"out_time_ms=(\d+)")
+        try:
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                if progress_bar is not None:
+                    m = out_time_regex.search(line)
+                    if m:
+                        ms = int(m.group(1))
+                        secs = ms / 1000000.0
+                        # Clamp monotonic increase
+                        current = progress_bar.n
+                        if secs > current:
+                            progress_bar.update(secs - current)
+        finally:
+            process.wait()
+            if progress_bar is not None:
+                # Ensure bar completes
+                if progress_bar.n < progress_bar.total:
+                    progress_bar.update(progress_bar.total - progress_bar.n)
+                progress_bar.close()
+    except Exception:
+        (
+            ffmpeg
+            .input(str(video_path))
+            .output(
+                pattern,
+                vf=vf,
+                vsync="vfr",
+                **{"qscale:v": 2},
+            )
+            .overwrite_output()
+            .run(quiet=True)
+        )
 
     return sorted(output_dir.glob("frame_*.jpg"))
 
@@ -80,12 +147,16 @@ def extract_keyframes_opencv(
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
     if method == "interval":
         eff_interval = interval_sec if interval_sec and interval_sec > 0 else 5.0
         step = max(1, int(fps * eff_interval))
         frame_idx = 0
         saved_paths: List[Path] = []
         keyframe_idx = 0
+        expected = frame_count // step if frame_count > 0 else None
+        bar = tqdm(total=expected, desc="Keyframes", unit="frame", leave=False)
         while True:
             ret = cap.grab()
             if not ret:
@@ -98,8 +169,10 @@ def extract_keyframes_opencv(
                     cv2.imwrite(str(out_path), frame_resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                     saved_paths.append(out_path)
                     keyframe_idx += 1
+                    bar.update(1)
             frame_idx += 1
         cap.release()
+        bar.close()
         return saved_paths
 
     # Default to scene detection for OpenCV path
@@ -109,6 +182,8 @@ def extract_keyframes_opencv(
     prev_hist = None
     frame_idx = 0
     keyframe_idx = 0
+    expected = (frame_count // frame_interval) if frame_count > 0 else None
+    bar = tqdm(total=expected, desc="Keyframes", unit="frame", leave=False)
 
     while True:
         ret = cap.grab()
@@ -137,8 +212,11 @@ def extract_keyframes_opencv(
             prev_hist = hist
 
         frame_idx += 1
+        if expected is not None:
+            bar.update(1)
 
     cap.release()
+    bar.close()
     return saved_paths
 
 

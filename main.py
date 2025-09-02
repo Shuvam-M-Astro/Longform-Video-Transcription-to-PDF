@@ -145,6 +145,11 @@ def main() -> None:
         print(f"Audio saved: {audio_path}", flush=True)
         if not args.transcribe_only:
             print("Extracting keyframes from file...", flush=True)
+            print(
+                f"  - method={args.kf_method} max_fps={args.max_fps} "
+                f"min_scene_diff={args.min_scene_diff} interval_sec={args.kf_interval_sec}",
+                flush=True,
+            )
             keyframe_paths = extract_keyframes(
                 video_path=video_path,
                 output_dir=frames_dir,

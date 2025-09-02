@@ -5,6 +5,8 @@ from typing import Dict, Optional, Tuple
 
 import ffmpeg
 from yt_dlp import YoutubeDL
+from tqdm import tqdm
+import re
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -222,14 +224,57 @@ def stream_extract_keyframes(
     pattern = str(output_dir / "frame_%06d.jpg")
 
     inp = ffmpeg.input(video_url, user_agent=_DEFAULT_UA, headers=headers) if headers else ffmpeg.input(video_url, user_agent=_DEFAULT_UA)
-    (
-        inp
-        .output(
-            pattern,
-            vf=vf,
-            vsync="vfr",
-            **{"qscale:v": 2},
+    try:
+        stream = (
+            inp
+            .output(
+                pattern,
+                vf=vf,
+                vsync="vfr",
+                **{"qscale:v": 2},
+            )
+            .overwrite_output()
+            .global_args("-progress", "pipe:1", "-nostats")
         )
-        .overwrite_output()
-        .run(quiet=True)
-    )
+        process = stream.run_async(pipe_stdout=True, pipe_stderr=False)
+        # No known total duration for live/progressive; show increasing count of frames written
+        bar = tqdm(total=None, desc="Keyframes (stream)", unit="frame", leave=False)
+        frame_regex = re.compile(rb"frame=\s*(\d+)")
+        out_time_regex = re.compile(rb"out_time_ms=(\d+)")
+        try:
+            last_n = 0
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                # Try to infer progress by frames emitted or time progressed
+                m = frame_regex.search(line)
+                if m:
+                    frames = int(m.group(1))
+                    if frames > last_n:
+                        bar.update(frames - last_n)
+                        last_n = frames
+                    continue
+                m2 = out_time_regex.search(line)
+                if m2:
+                    # If out_time_ms reported, update roughly per second
+                    ms = int(m2.group(1))
+                    secs = int(ms / 1_000_000)
+                    if secs > last_n:
+                        bar.update(secs - last_n)
+                        last_n = secs
+        finally:
+            process.wait()
+            bar.close()
+    except Exception:
+        (
+            inp
+            .output(
+                pattern,
+                vf=vf,
+                vsync="vfr",
+                **{"qscale:v": 2},
+            )
+            .overwrite_output()
+            .run(quiet=True)
+        )
