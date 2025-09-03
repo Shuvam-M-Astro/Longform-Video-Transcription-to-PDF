@@ -53,6 +53,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # Force simple 3-step flow: download/stream -> transcribe -> build report
+    # Always run in transcribe-only mode per user request
+    args.transcribe_only = True
     output_dir = Path(args.out)
     ensure_dirs(output_dir)
 
