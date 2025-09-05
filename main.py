@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--browser-profile", type=str, default=None, help="Specific browser profile name, e.g., 'Default' or 'Profile 1'")
     parser.add_argument("--cookies-file", type=str, default=None, help="Path to cookies.txt file")
     parser.add_argument("--use-android-client", action="store_true", help="Use YouTube Android client fallback")
+    parser.add_argument("--report-style", type=str, choices=["minimal", "book"], default="minimal", help="PDF layout style")
     return parser.parse_args()
 
 
@@ -236,6 +237,7 @@ def main() -> None:
         classification_result=classification_result,
         output_dir=output_dir,
         progress_cb=lambda p: progress.update(p),
+        report_style=args.report_style,
     )
     progress.end_step()
     print(f"Report ready: {report_pdf_path}", flush=True)

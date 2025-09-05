@@ -66,8 +66,36 @@ def resolve_stream_urls(
         extra={"quiet": True, "no_warnings": True},
     )
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    # Try with provided cookie options first; if that fails (e.g., Chrome DB locked),
+    # retry without cookies, and finally with Android client as a last resort.
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        # First fallback: drop cookies completely
+        try:
+            print("Cookie-based extraction failed; retrying without cookies...", flush=True)
+            ydl_opts_nocookies = _build_ydl_opts(
+                cookies_from_browser=None,
+                browser_profile=None,
+                cookies_file=None,
+                use_android_client=use_android_client,
+                extra={"quiet": True, "no_warnings": True},
+            )
+            with YoutubeDL(ydl_opts_nocookies) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception:
+            # Second fallback: try Android client without cookies
+            print("Retrying with Android client (no cookies)...", flush=True)
+            ydl_opts_android = _build_ydl_opts(
+                cookies_from_browser=None,
+                browser_profile=None,
+                cookies_file=None,
+                use_android_client=True,
+                extra={"quiet": True, "no_warnings": True},
+            )
+            with YoutubeDL(ydl_opts_android) as ydl:
+                info = ydl.extract_info(url, download=False)
 
     best_audio = None
     best_video = None
