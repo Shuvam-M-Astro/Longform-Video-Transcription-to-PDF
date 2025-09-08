@@ -43,6 +43,7 @@ def build_pdf_report(
     *,
     progress_cb: Optional[Callable[[float], None]] = None,
     report_style: str = "minimal",
+    video_title: str = "Video Report",
 ) -> Path:
     output_pdf_path = Path(output_pdf_path)
     output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -242,7 +243,7 @@ def build_pdf_report(
     def _build_book():
         # Title page
         title_style = styles["Title"]
-        flow.append(Paragraph("Video Report", title_style))
+        flow.append(Paragraph(xml_escape(video_title or "Video Report"), title_style))
         flow.append(Spacer(1, 0.3 * inch))
         # Abstract
         h1 = styles["Heading1"]
@@ -299,15 +300,32 @@ def build_pdf_report(
         else:
             for ch in chapters:
                 idx = ch["index"]
-                start = int(float(ch.get("start", 0)))
-                end = int(float(ch.get("end", 0)))
-                def fmt(t):
-                    h = t // 3600; m = (t % 3600) // 60; s = t % 60
-                    return f"{h:02d}:{m:02d}:{s:02d}"
-                flow.append(Paragraph(f"Chapter {idx} ({fmt(start)} – {fmt(end)})", h1))
+                # Generate a content-based chapter title
+                ch_text = _normalize_text(ch["segments"]) if ch.get("segments") else ""
+                # Heuristic: first meaningful sentence as chapter title,
+                # falling back to a keyword-based short title
+                def _chapter_title(text: str) -> str:
+                    sents = _split_sentences(text)
+                    for s in sents:
+                        if len(s) >= 20:
+                            return s[:120] + ("…" if len(s) > 120 else "")
+                    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-']+", text)
+                    if not words:
+                        return f"Chapter {idx}"
+                    # pick top keywords
+                    freq: Dict[str, int] = {}
+                    for w in words:
+                        lw = w.lower()
+                        if lw in {"the","a","an","and","or","but","if","then","so","of","to","in","on","for","with","as","is","are","was","were","be","been","it","this","that","these","those","at","by","from","about","into","over","after","before","between","out","up","down","off","above","under","again","further","once"}:
+                            continue
+                        freq[lw] = freq.get(lw, 0) + 1
+                    top = sorted(freq.items(), key=lambda t: t[1], reverse=True)[:4]
+                    key = " ".join(w for w, _ in top)
+                    return (key.title() if key else f"Chapter {idx}")
+                title_text = _chapter_title(ch_text)
+                flow.append(Paragraph(xml_escape(f"Chapter {idx}: {title_text}"), h1))
                 flow.append(Spacer(1, 0.08 * inch))
                 # Chapter summary
-                ch_text = _normalize_text(ch["segments"])
                 ch_sents = _split_sentences(ch_text)
                 ch_summary = _summarize(ch_sents, max_sentences=3)
                 if ch_summary:
@@ -315,8 +333,8 @@ def build_pdf_report(
                     for s in ch_summary:
                         flow.append(Paragraph(xml_escape(s), body))
                         flow.append(Spacer(1, 0.05 * inch))
-                # Chapter body
-                paras = _to_paragraphs(ch["segments"], target_chars=900)
+                # Chapter body as prose paragraphs (no timestamps)
+                paras = _to_paragraphs(ch.get("segments", []), target_chars=900)
                 for para in paras:
                     flow.append(Paragraph(xml_escape(para), body))
                     flow.append(Spacer(1, 0.08 * inch))

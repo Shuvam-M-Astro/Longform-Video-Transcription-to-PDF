@@ -9,6 +9,9 @@ import numpy as np
 import shutil
 import easyocr
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import os
 
 
 _CODE_TOKENS = {
@@ -76,12 +79,21 @@ def classify_frames(
     except Exception:
         use_gpu = False
 
-    reader = easyocr.Reader(["en"], gpu=use_gpu)
-
     result: Dict[str, List[Path]] = {"code": [], "plots": [], "images": []}
+    lock = threading.Lock()
 
-    total = len(frame_paths) if frame_paths else 0
-    for idx, frame_path in enumerate(tqdm(frame_paths, desc="Classifying", unit="frame", leave=False)):
+    thread_local: threading.local = threading.local()
+
+    def get_reader() -> easyocr.Reader:
+        rdr = getattr(thread_local, "reader", None)
+        if rdr is None:
+            rdr = easyocr.Reader(["en"], gpu=use_gpu)
+            thread_local.reader = rdr
+        return rdr
+
+    def process_one(args: tuple[int, Path]) -> None:
+        idx, frame_path = args
+        reader = get_reader()
         ocr_result = reader.readtext(str(frame_path), detail=1, paragraph=True)
         texts = [entry[1] for entry in ocr_result if isinstance(entry, (list, tuple)) and len(entry) >= 2]
         text = "\n".join(t.strip() for t in texts if t and t.strip())
@@ -93,21 +105,41 @@ def classify_frames(
         if looks_like_code and not looks_like_plot:
             target = classified_root / "code" / frame_path.name
             shutil.copy2(frame_path, target)
-            result["code"].append(target)
+            with lock:
+                result["code"].append(target)
             snippet_file = snippets_dir / f"snippet_{idx:04d}.txt"
             snippet_file.write_text(text, encoding="utf-8")
         elif looks_like_plot:
             target = classified_root / "plots" / frame_path.name
             shutil.copy2(frame_path, target)
-            result["plots"].append(target)
+            with lock:
+                result["plots"].append(target)
         else:
             target = classified_root / "images" / frame_path.name
             shutil.copy2(frame_path, target)
-            result["images"].append(target)
+            with lock:
+                result["images"].append(target)
 
-        if progress_cb and total:
-            pct = max(0.0, min(100.0, ((idx + 1) / total) * 100.0))
-            progress_cb(pct)
+    total = len(frame_paths) if frame_paths else 0
+    if total == 0:
+        if progress_cb:
+            progress_cb(100.0)
+        return result
+
+    max_workers = 1 if use_gpu else min(8, max(2, (os.cpu_count() or 2)))
+    tasks = [(idx, fp) for idx, fp in enumerate(frame_paths)]
+
+    completed = 0
+    bar = tqdm(total=total, desc="Classifying", unit="frame", leave=False)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(process_one, t) for t in tasks]
+        for _ in as_completed(futures):
+            completed += 1
+            bar.update(1)
+            if progress_cb and total:
+                pct = max(0.0, min(100.0, (completed / total) * 100.0))
+                progress_cb(pct)
+    bar.close()
 
     if progress_cb:
         progress_cb(100.0)

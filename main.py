@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 
 from src.video_doc.download import download_video
@@ -17,6 +18,7 @@ from src.video_doc.stream import (
     fallback_download_small_video,
 )
 from src.video_doc.progress import PipelineProgress, make_console_progress_printer
+from yt_dlp import YoutubeDL
 
 
 def ensure_dirs(output_dir: Path) -> None:
@@ -58,7 +60,68 @@ def main() -> None:
     # Always run in transcribe-only mode per user request
     args.transcribe_only = True
     output_dir = Path(args.out)
+    # Clean output directory before running
+    if output_dir.exists():
+        print(f"Cleaning output directory: {output_dir}", flush=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
     ensure_dirs(output_dir)
+
+    # Try to extract a human-readable video title for the report
+    def _extract_video_title() -> str:
+        def try_opts(use_cookies: bool, use_android: bool):
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+            }
+            if use_cookies and args.cookies_from_browser:
+                tup = (args.cookies_from_browser,) if not args.browser_profile else (args.cookies_from_browser, args.browser_profile)
+                ydl_opts["cookiesfrombrowser"] = tup
+            if use_cookies and args.cookies_file:
+                ydl_opts["cookiefile"] = str(Path(args.cookies_file))
+            if use_android:
+                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(args.url, download=False)
+                return str(info.get("title") or "")
+        # Attempt with cookies and current client
+        try:
+            title = try_opts(use_cookies=True, use_android=args.use_android_client)
+            if title:
+                return title
+        except Exception:
+            pass
+        # Attempt without cookies
+        try:
+            title = try_opts(use_cookies=False, use_android=args.use_android_client)
+            if title:
+                return title
+        except Exception:
+            pass
+        # Attempt Android client without cookies
+        try:
+            title = try_opts(use_cookies=False, use_android=True)
+            if title:
+                return title
+        except Exception:
+            pass
+        # Fallback: derive from URL slug
+        try:
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(args.url)
+            if parsed.netloc.lower().endswith("youtube.com"):
+                vid = parse_qs(parsed.query).get("v", [""])[0]
+                if vid:
+                    return f"YouTube Video {vid}"
+            if parsed.path:
+                slug = Path(parsed.path).name.replace("-", " ").replace("_", " ")
+                slug = slug.strip() or "Video Report"
+                return slug.title()
+        except Exception:
+            pass
+        return "Video Report"
+
+    video_title = _extract_video_title()
 
     video_path = output_dir / "video.mp4"
     audio_path = output_dir / "audio.wav"
@@ -238,6 +301,7 @@ def main() -> None:
         output_dir=output_dir,
         progress_cb=lambda p: progress.update(p),
         report_style=args.report_style,
+        video_title=video_title,
     )
     progress.end_step()
     print(f"Report ready: {report_pdf_path}", flush=True)
