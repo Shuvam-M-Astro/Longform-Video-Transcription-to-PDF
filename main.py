@@ -33,7 +33,8 @@ def ensure_dirs(output_dir: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a PDF document from a long-form video")
-    parser.add_argument("--url", type=str, required=True, help="Video URL")
+    parser.add_argument("--url", type=str, required=False, help="Video URL")
+    parser.add_argument("--video", type=str, default=None, help="Path to a local video file (e.g., .mp4, .mkv)")
     parser.add_argument("--out", type=str, default="./outputs/run", help="Output directory")
     parser.add_argument("--language", type=str, default="auto", help="Language code or 'auto'")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam size for decoding")
@@ -51,7 +52,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cookies-file", type=str, default=None, help="Path to cookies.txt file")
     parser.add_argument("--use-android-client", action="store_true", help="Use YouTube Android client fallback")
     parser.add_argument("--report-style", type=str, choices=["minimal", "book"], default="minimal", help="PDF layout style")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.url and not args.video:
+        parser.error("You must provide either --url or --video")
+    return args
 
 
 def main() -> None:
@@ -59,6 +63,9 @@ def main() -> None:
     # Force simple 3-step flow: download/stream -> transcribe -> build report
     # Always run in transcribe-only mode per user request
     args.transcribe_only = True
+    # Local file implies no streaming mode
+    if getattr(args, "video", None):
+        args.streaming = False
     output_dir = Path(args.out)
     # Clean output directory before running
     if output_dir.exists():
@@ -68,6 +75,14 @@ def main() -> None:
 
     # Try to extract a human-readable video title for the report
     def _extract_video_title() -> str:
+        # Prefer local filename when provided
+        if getattr(args, "video", None):
+            try:
+                stem = Path(args.video).stem
+                title = stem.replace("-", " ").replace("_", " ").strip()
+                return title.title() if title else "Video Report"
+            except Exception:
+                return "Video Report"
         def try_opts(use_cookies: bool, use_android: bool):
             ydl_opts = {
                 "quiet": True,
@@ -123,14 +138,25 @@ def main() -> None:
 
     video_title = _extract_video_title()
 
-    video_path = output_dir / "video.mp4"
+    # Determine source video path
+    if getattr(args, "video", None):
+        src_video_path = Path(args.video)
+        if not src_video_path.exists():
+            raise FileNotFoundError(f"Local video not found: {src_video_path}")
+        video_path = src_video_path
+    else:
+        video_path = output_dir / "video.mp4"
     audio_path = output_dir / "audio.wav"
     transcript_dir = output_dir / "transcript"
     frames_dir = output_dir / "frames" / "keyframes"
     classified_dir = output_dir / "classified"
     snippets_dir = output_dir / "snippets" / "code"
 
-    print(f"Mode: {'streaming' if args.streaming else 'download'}; transcribe_only={args.transcribe_only}", flush=True)
+    print(
+        f"Mode: {'streaming' if args.streaming else ('local-file' if getattr(args, 'video', None) else 'download')}; "
+        f"transcribe_only={args.transcribe_only}",
+        flush=True,
+    )
 
     # Overall pipeline progress (weights roughly proportional to average time)
     # Download 20, Audio 10, Frames 20, Transcribe 40, Classify 5, PDF 5
@@ -217,19 +243,22 @@ def main() -> None:
                 progress.end_step()
                 print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
     else:
-        if not args.skip_download or not video_path.exists():
-            print("Downloading full video (mp4)...", flush=True)
-            progress.start_step("Download video", 20)
-            download_video(
-                args.url,
-                video_path,
-                cookies_from_browser=args.cookies_from_browser,
-                browser_profile=args.browser_profile,
-                cookies_file=Path(args.cookies_file) if args.cookies_file else None,
-                use_android_client=args.use_android_client,
-                progress_cb=lambda p: progress.update(p),
-            )
-            progress.end_step()
+        if getattr(args, "video", None):
+            print(f"Using local video file: {video_path}", flush=True)
+        else:
+            if not args.skip_download or not video_path.exists():
+                print("Downloading full video (mp4)...", flush=True)
+                progress.start_step("Download video", 20)
+                download_video(
+                    args.url,
+                    video_path,
+                    cookies_from_browser=args.cookies_from_browser,
+                    browser_profile=args.browser_profile,
+                    cookies_file=Path(args.cookies_file) if args.cookies_file else None,
+                    use_android_client=args.use_android_client,
+                    progress_cb=lambda p: progress.update(p),
+                )
+                progress.end_step()
         print("Extracting audio from file...", flush=True)
         progress.start_step("Extract audio", 10)
         extract_audio_wav(video_path, audio_path, progress_cb=lambda p: progress.update(p))
@@ -313,7 +342,7 @@ def main() -> None:
         "keyframes": len(keyframe_paths),
         "classified": {k: len(v) for k, v in classification_result.items()},
         "report_pdf": str(report_pdf_path),
-        "mode": "streaming" if args.streaming else "download",
+        "mode": ("streaming" if args.streaming else ("local-file" if getattr(args, "video", None) else "download")),
         "transcribe_only": args.transcribe_only,
     }, indent=2))
 
