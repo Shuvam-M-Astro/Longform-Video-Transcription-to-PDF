@@ -64,6 +64,25 @@ Transcribe-only (skip frames and classification; fastest):
 python main.py --url "<VIDEO_URL>" --out ".\outputs\run1" --transcribe-only --language en --beam-size 1 --whisper-model small
 ```
 
+### Use an existing local video file (no download)
+You can process a file you already have on disk with `--video` instead of `--url`.
+
+```cmd
+:: Local MP4 (Windows paths need quotes if they include spaces)
+python main.py --video "C:\path\to\your\video.mp4" --out ".\outputs\run1"
+
+:: Force language/model (optional)
+python main.py --video "C:\path\to\your\video.mp4" --out ".\outputs\run1" --language en --beam-size 1 --whisper-model small
+
+:: Audio-only files also work (mp3/m4a/wav/flac)
+python main.py --video ".\inputs\lecture_audio.mp3" --out ".\outputs\run1"
+```
+
+Notes:
+- `--video` accepts any container/codec FFmpeg can read (tested: mp4, mkv, mov, webm; audio: mp3, m4a, wav, flac).
+- You do not need `--skip-download` when using `--video` (no network download happens).
+- Output structure is the same, except no `video.mp4` is saved in the run folder.
+
 Reuse existing download:
 ```cmd
 python main.py --url "<VIDEO_URL>" --out ".\outputs\run1" --skip-download
