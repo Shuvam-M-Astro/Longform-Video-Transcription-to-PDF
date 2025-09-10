@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--browser-profile", type=str, default=None, help="Specific browser profile name, e.g., 'Default' or 'Profile 1'")
     parser.add_argument("--cookies-file", type=str, default=None, help="Path to cookies.txt file")
     parser.add_argument("--use-android-client", action="store_true", help="Use YouTube Android client fallback")
-    parser.add_argument("--report-style", type=str, choices=["minimal", "book"], default="minimal", help="PDF layout style")
+    parser.add_argument("--report-style", type=str, choices=["minimal", "book"], default="book", help="PDF layout style")
     args = parser.parse_args()
     if not args.url and not args.video:
         parser.error("You must provide either --url or --video")
