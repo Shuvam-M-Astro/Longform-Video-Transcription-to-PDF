@@ -67,7 +67,8 @@ class PipelineProgress:
 
 def make_console_progress_printer() -> Callable[[float, str], None]:
     def _printer(percent: float, label: str) -> None:
-        print(f"Progress: {percent:5.1f}% - {label}", flush=True)
+        # More compact, aligned progress line
+        print(f"[progress] {percent:6.2f}% | {label}", flush=True)
     return _printer
 
 
