@@ -70,6 +70,20 @@ def download_video(
     if cookies_file:
         ydl_opts["cookiefile"] = str(cookies_file)
 
+    # Verbose summary of chosen options
+    flags = []
+    if cfb:
+        flags.append("cookies_from_browser")
+    if cookies_file:
+        flags.append("cookies_file")
+    if use_android_client:
+        flags.append("android_client")
+    flag_str = ", ".join(flags) if flags else "no-auth"
+    print(
+        f"[download] Starting: format={ydl_opts.get('format')} -> {output_path} ({flag_str})",
+        flush=True,
+    )
+
     def _hook(d: Dict[str, Any]) -> None:
         if not progress_cb:
             return
@@ -93,6 +107,11 @@ def download_video(
         ydl.download([url])
 
     if output_path.exists():
+        try:
+            size_mb = output_path.stat().st_size / (1024 * 1024)
+            print(f"[download] Finished: {output_path.name} ({size_mb:.1f} MB)", flush=True)
+        except Exception:
+            pass
         return output_path
 
     candidates = list(output_path.parent.glob(output_path.stem + ".*"))
@@ -112,4 +131,9 @@ def download_video(
 
     if progress_cb:
         progress_cb(100.0)
+    try:
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"[download] Finished: {output_path.name} ({size_mb:.1f} MB)", flush=True)
+    except Exception:
+        pass
     return output_path
