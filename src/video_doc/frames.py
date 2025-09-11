@@ -56,6 +56,11 @@ def extract_keyframes_ffmpeg(
     # Try live-progress run; if anything fails, fallback to quiet run
     try:
         total_seconds = _probe_duration_seconds(video_path) or 0.0
+        print(
+            f"[frames] ffmpeg: method={method} vf=\"{vf}\" max_fps={max_fps} "
+            f"scene_th={scene_threshold} interval={interval_sec}s duration≈{total_seconds:.1f}s",
+            flush=True,
+        )
         stream = (
             ffmpeg
             .input(str(video_path))
@@ -103,6 +108,7 @@ def extract_keyframes_ffmpeg(
             if progress_cb:
                 progress_cb(100.0)
     except Exception:
+        print("[frames] ffmpeg live-progress unavailable; running without live progress...", flush=True)
         (
             ffmpeg
             .input(str(video_path))
@@ -157,6 +163,12 @@ def extract_keyframes_opencv(
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+    print(
+        f"[frames] opencv: method={method} fps={fps:.2f} frames={frame_count} "
+        f"max_fps={max_fps} scene_th={scene_threshold} interval={interval_sec}s",
+        flush=True,
+    )
 
     if method == "interval":
         eff_interval = interval_sec if interval_sec and interval_sec > 0 else 5.0
