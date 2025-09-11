@@ -118,6 +118,10 @@ def resolve_stream_urls(
 
     headers = info.get("http_headers") or {"User-Agent": _DEFAULT_UA}
 
+    print(
+        f"[stream] Resolved: audio={'yes' if bool(best_audio) else 'no'}, video={'yes' if bool(best_video) else 'no'}",
+        flush=True,
+    )
     return {
         "audio_url": best_audio,
         "video_url": best_video,
@@ -289,6 +293,10 @@ def stream_extract_keyframes(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     vf = f"select='gt(scene,{scene_threshold})',fps={max_fps}"
+    print(
+        f"[frames] stream: vf=\"{vf}\" max_fps={max_fps} scene_th={scene_threshold}",
+        flush=True,
+    )
     pattern = str(output_dir / "frame_%06d.jpg")
 
     inp = ffmpeg.input(video_url, user_agent=_DEFAULT_UA, headers=headers) if headers else ffmpeg.input(video_url, user_agent=_DEFAULT_UA)
