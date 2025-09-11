@@ -23,6 +23,7 @@ def extract_audio_wav(video_path: Path, audio_path: Path, *, progress_cb: Option
     audio_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_seconds = _probe_duration_seconds(video_path) or 0.0
+    print(f"[audio] Extracting WAV: duration≈{total_seconds:.1f}s -> {audio_path}", flush=True)
 
     try:
         stream = (
