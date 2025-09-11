@@ -51,6 +51,10 @@ def transcribe_audio(
     compute_type = _select_compute_type()
     prefer_cuda = compute_type == "float16"
     model = _init_model(model_size, prefer_cuda)
+    print(
+        f"[transcribe] Initialized model: size={model_size} device={'cuda' if prefer_cuda else 'cpu'} compute_type={compute_type}",
+        flush=True,
+    )
 
     lang_arg: Optional[str] = None if language == "auto" else language
 
