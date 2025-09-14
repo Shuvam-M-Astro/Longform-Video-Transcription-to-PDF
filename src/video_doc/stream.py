@@ -287,6 +287,10 @@ def stream_extract_keyframes(
     scene_threshold: float = 0.45,
     headers: Optional[str] = None,
     *,
+    output_format: str = "jpg",
+    jpeg_quality: int = 90,
+    max_width: int = 1280,
+    max_frames: Optional[int] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> None:
     output_dir = Path(output_dir)
@@ -297,17 +301,29 @@ def stream_extract_keyframes(
         f"[frames] stream: vf=\"{vf}\" max_fps={max_fps} scene_th={scene_threshold}",
         flush=True,
     )
-    pattern = str(output_dir / "frame_%06d.jpg")
+    ext = (output_format or "jpg").lower().lstrip(".")
+    if ext == "jpeg":
+        ext = "jpg"
+    if ext not in {"jpg", "png", "webp"}:
+        ext = "jpg"
+    # Optional resize to cap width
+    if max_width and max_width > 0:
+        vf = f"{vf},scale='min(iw\\,{max_width})':-2"
+    pattern = str(output_dir / f"frame_%06d.{ext}")
 
     inp = ffmpeg.input(video_url, user_agent=_DEFAULT_UA, headers=headers) if headers else ffmpeg.input(video_url, user_agent=_DEFAULT_UA)
     try:
+        out_kwargs = {"vf": vf, "vsync": "vfr"}
+        if ext == "jpg":
+            qscale = max(2, min(31, int(round(31 - (jpeg_quality / 100.0) * 29))))
+            out_kwargs["qscale:v"] = qscale
+        if max_frames and max_frames > 0:
+            out_kwargs["vframes"] = int(max_frames)
         stream = (
             inp
             .output(
                 pattern,
-                vf=vf,
-                vsync="vfr",
-                **{"qscale:v": 2},
+                **out_kwargs,
             )
             .overwrite_output()
             .global_args("-progress", "pipe:1", "-nostats")
@@ -349,13 +365,17 @@ def stream_extract_keyframes(
             if progress_cb:
                 progress_cb(100.0)
     except Exception:
+        out_kwargs = {"vf": vf, "vsync": "vfr"}
+        if ext == "jpg":
+            qscale = max(2, min(31, int(round(31 - (jpeg_quality / 100.0) * 29))))
+            out_kwargs["qscale:v"] = qscale
+        if max_frames and max_frames > 0:
+            out_kwargs["vframes"] = int(max_frames)
         (
             inp
             .output(
                 pattern,
-                vf=vf,
-                vsync="vfr",
-                **{"qscale:v": 2},
+                **out_kwargs,
             )
             .overwrite_output()
             .run(quiet=True)
