@@ -7,7 +7,7 @@ from pathlib import Path
 from src.video_doc.download import download_video
 from src.video_doc.audio import extract_audio_wav
 from src.video_doc.transcribe import transcribe_audio
-from src.video_doc.frames import extract_keyframes
+from src.video_doc.frames import extract_keyframes, build_contact_sheet
 from src.video_doc.classify import classify_frames
 from src.video_doc.pdf import build_pdf_report
 from src.video_doc.stream import (
@@ -43,15 +43,43 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-scene-diff", type=float, default=0.45, help="Scene change threshold [0-1]")
     parser.add_argument("--kf-method", type=str, choices=["scene", "iframe", "interval"], default="scene", help="Keyframe extraction method")
     parser.add_argument("--kf-interval-sec", type=float, default=5.0, help="Interval seconds for interval method")
+    # New keyframe output options
+    parser.add_argument("--frame-format", type=str, choices=["jpg", "png", "webp"], default="jpg", help="Output image format for frames")
+    parser.add_argument("--frame-quality", type=int, default=90, help="Quality for JPG/WEBP (1-100)")
+    parser.add_argument("--frame-max-width", type=int, default=1280, help="Resize frames to max width (pixels); <=0 to disable")
+    parser.add_argument("--frame-max-frames", type=int, default=0, help="Cap total saved frames; 0 to disable")
+    parser.add_argument("--skip-dark", action="store_true", help="Skip mostly dark frames (OpenCV path)")
+    parser.add_argument("--dark-value", type=int, default=16, help="Dark pixel V threshold [0-255]")
+    parser.add_argument("--dark-ratio", type=float, default=0.98, help="Dark pixel ratio threshold [0-1]")
+    parser.add_argument("--dedupe", action="store_true", help="Skip near-duplicate frames by histogram similarity (OpenCV path)")
+    parser.add_argument("--dedupe-sim", type=float, default=0.995, help="Histogram correlation threshold to treat as duplicate [0-1]")
+    # Contact sheet
+    parser.add_argument("--contact-sheet", action="store_true", help="Generate a contact sheet of keyframes")
+    parser.add_argument("--cs-columns", type=int, default=6, help="Contact sheet columns")
+    parser.add_argument("--cs-thumb-width", type=int, default=300, help="Contact sheet thumbnail width (px)")
+    parser.add_argument("--cs-padding", type=int, default=8, help="Contact sheet padding (px)")
+    parser.add_argument("--cs-title", type=str, default=None, help="Contact sheet title text")
+    parser.add_argument("--cs-title-height", type=int, default=40, help="Contact sheet title area height (px)")
+    # Pipeline mode and IO
     parser.add_argument("--skip-download", action="store_true", help="Skip download if video exists")
     parser.add_argument("--streaming", action="store_true", help="Process via streaming without saving full video")
-    parser.add_argument("--transcribe-only", action="store_true", help="Skip frames/classification; transcript-only PDF")
+    parser.add_argument("--pipeline-mode", type=str, choices=["transcribe-only", "full"], default="transcribe-only", help="Pipeline mode")
+    parser.add_argument("--transcribe-only", action="store_true", help="Skip frames/classification; transcript-only PDF (compat)")
     # Download auth/bypass options
     parser.add_argument("--cookies-from-browser", type=str, default=None, help="Browser to read cookies from (chrome|edge|brave|firefox)")
     parser.add_argument("--browser-profile", type=str, default=None, help="Specific browser profile name, e.g., 'Default' or 'Profile 1'")
     parser.add_argument("--cookies-file", type=str, default=None, help="Path to cookies.txt file")
     parser.add_argument("--use-android-client", action="store_true", help="Use YouTube Android client fallback")
     parser.add_argument("--report-style", type=str, choices=["minimal", "book"], default="book", help="PDF layout style")
+    # Audio extraction controls
+    parser.add_argument("--trim-start", type=float, default=0.0, help="Trim start seconds of audio")
+    parser.add_argument("--trim-end", type=float, default=0.0, help="Trim end seconds of audio (from end); 0 for none")
+    parser.add_argument("--volume-gain", type=float, default=0.0, help="Audio volume gain in dB (0 for none)")
+    # Classification controls
+    parser.add_argument("--ocr-langs", type=str, default="en", help="Comma-separated OCR languages, e.g., 'en,fr'")
+    parser.add_argument("--skip-blurry", action="store_true", help="Skip classifying frames detected as blurry")
+    parser.add_argument("--blurry-threshold", type=float, default=60.0, help="Blurriness threshold (variance of Laplacian)")
+    parser.add_argument("--max-per-category", type=int, default=0, help="Max items saved per category; 0 for unlimited")
     args = parser.parse_args()
     if not args.url and not args.video:
         parser.error("You must provide either --url or --video")
@@ -60,9 +88,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    # Force simple 3-step flow: download/stream -> transcribe -> build report
-    # Always run in transcribe-only mode per user request
-    args.transcribe_only = True
+    # Pipeline mode: transcribe-only (default) or full (compat flag supported)
+    args.transcribe_only = args.transcribe_only or (args.pipeline_mode == "transcribe-only")
     # Local file implies no streaming mode
     if getattr(args, "video", None):
         args.streaming = False
@@ -211,6 +238,10 @@ def main() -> None:
                     max_fps=args.max_fps,
                     scene_threshold=args.min_scene_diff,
                     headers=resolved.get("headers"),
+                    output_format=args.frame_format,
+                    jpeg_quality=args.frame_quality,
+                    max_width=args.frame_max_width,
+                    max_frames=(args.frame_max_frames if args.frame_max_frames > 0 else None),
                     progress_cb=lambda p: progress.update(p),
                 )
                 progress.end_step()
@@ -261,7 +292,14 @@ def main() -> None:
                 progress.end_step()
         print("Extracting audio from file...", flush=True)
         progress.start_step("Extract audio", 10)
-        extract_audio_wav(video_path, audio_path, progress_cb=lambda p: progress.update(p))
+        extract_audio_wav(
+            video_path,
+            audio_path,
+            progress_cb=lambda p: progress.update(p),
+            start_time=args.trim_start,
+            end_trim=args.trim_end,
+            volume_gain_db=args.volume_gain,
+        )
         progress.end_step()
         print(f"Audio saved: {audio_path}", flush=True)
         if not args.transcribe_only:
@@ -279,10 +317,36 @@ def main() -> None:
                 scene_threshold=args.min_scene_diff,
                 method=args.kf_method,
                 interval_sec=args.kf_interval_sec,
+                output_format=args.frame_format,
+                jpeg_quality=args.frame_quality,
+                max_width=args.frame_max_width,
+                max_frames=(args.frame_max_frames if args.frame_max_frames > 0 else None),
+                skip_dark=args.skip_dark,
+                dark_pixel_value=args.dark_value,
+                dark_ratio_threshold=args.dark_ratio,
+                dedupe=args.dedupe,
+                dedupe_similarity=args.dedupe_sim,
                 progress_cb=lambda p: progress.update(p),
             )
             progress.end_step()
             print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
+            # Contact sheet
+            if args.contact_sheet and keyframe_paths:
+                print("Building contact sheet...", flush=True)
+                cs_path = frames_dir.parent / "contact_sheet.jpg"
+                try:
+                    build_contact_sheet(
+                        image_paths=keyframe_paths,
+                        output_path=cs_path,
+                        columns=args.cs_columns,
+                        thumb_width=args.cs_thumb_width,
+                        padding=args.cs_padding,
+                        title=(args.cs_title or video_title),
+                        title_height=args.cs_title_height,
+                    )
+                    print(f"Contact sheet saved: {cs_path}", flush=True)
+                except Exception as e:
+                    print(f"Contact sheet failed: {e}", flush=True)
 
     transcript_txt = transcript_dir / "transcript.txt"
     segments_json = transcript_dir / "segments.json"
@@ -310,6 +374,10 @@ def main() -> None:
             classified_root=classified_dir,
             snippets_dir=snippets_dir,
             progress_cb=lambda p: progress.update(p),
+            ocr_languages=[lang.strip() for lang in str(args.ocr_langs).split(',') if lang.strip()],
+            skip_blurry=args.skip_blurry,
+            blurry_threshold=args.blurry_threshold,
+            max_per_category=(args.max_per_category if args.max_per_category > 0 else None),
         )
         progress.end_step()
         print(
@@ -322,6 +390,14 @@ def main() -> None:
     print("Building PDF report...", flush=True)
     progress.start_step("Build PDF", 5)
     report_pdf_path = output_dir / "report.pdf"
+    # Optionally detect contact sheet path to embed later
+    contact_sheet_path = None
+    try:
+        possible_cs = (frames_dir.parent / "contact_sheet.jpg")
+        contact_sheet_path = possible_cs if possible_cs.exists() else None
+    except Exception:
+        contact_sheet_path = None
+
     build_pdf_report(
         output_pdf_path=report_pdf_path,
         transcript_txt_path=transcript_txt,
@@ -331,6 +407,7 @@ def main() -> None:
         progress_cb=lambda p: progress.update(p),
         report_style=args.report_style,
         video_title=video_title,
+        contact_sheet_path=contact_sheet_path,
     )
     progress.end_step()
     print(f"Report ready: {report_pdf_path}", flush=True)
