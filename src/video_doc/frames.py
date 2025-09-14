@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Sequence
 
 import ffmpeg
 import cv2
@@ -37,6 +37,10 @@ def extract_keyframes_ffmpeg(
     scene_threshold: float = 0.45,
     method: str = "scene",  # scene | iframe | interval
     interval_sec: float = 5.0,
+    output_format: str = "jpg",
+    jpeg_quality: int = 90,
+    max_width: int = 1280,
+    max_frames: Optional[int] = None,
     *,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> List[Path]:
@@ -51,7 +55,19 @@ def extract_keyframes_ffmpeg(
     else:  # scene
         vf = f"select='gt(scene,{scene_threshold})',fps={max_fps}"
 
-    pattern = str(output_dir / "frame_%06d.jpg")
+    # Optional resize to cap width
+    if max_width and max_width > 0:
+        # Escape comma inside min(iw,MAX) expression
+        vf = f"{vf},scale='min(iw\\,{max_width})':-2"
+
+    # Normalize output format
+    ext = output_format.lower().lstrip(".")
+    if ext == "jpeg":
+        ext = "jpg"
+    if ext not in {"jpg", "png", "webp"}:
+        ext = "jpg"
+
+    pattern = str(output_dir / f"frame_%06d.{ext}")
 
     # Try live-progress run; if anything fails, fallback to quiet run
     try:
@@ -61,14 +77,20 @@ def extract_keyframes_ffmpeg(
             f"scene_th={scene_threshold} interval={interval_sec}s duration≈{total_seconds:.1f}s",
             flush=True,
         )
+        # Map jpeg_quality (0-100) to qscale (2-31, lower is better)
+        out_kwargs = {"vf": vf, "vsync": "vfr"}
+        if ext == "jpg":
+            qscale = max(2, min(31, int(round(31 - (jpeg_quality / 100.0) * 29))))
+            out_kwargs["qscale:v"] = qscale
+        if max_frames and max_frames > 0:
+            out_kwargs["vframes"] = int(max_frames)
+
         stream = (
             ffmpeg
             .input(str(video_path))
             .output(
                 pattern,
-                vf=vf,
-                vsync="vfr",
-                **{"qscale:v": 2},
+                **out_kwargs,
             )
             .overwrite_output()
             .global_args("-progress", "pipe:1", "-nostats")
@@ -109,14 +131,18 @@ def extract_keyframes_ffmpeg(
                 progress_cb(100.0)
     except Exception:
         print("[frames] ffmpeg live-progress unavailable; running without live progress...", flush=True)
+        out_kwargs = {"vf": vf, "vsync": "vfr"}
+        if ext == "jpg":
+            qscale = max(2, min(31, int(round(31 - (jpeg_quality / 100.0) * 29))))
+            out_kwargs["qscale:v"] = qscale
+        if max_frames and max_frames > 0:
+            out_kwargs["vframes"] = int(max_frames)
         (
             ffmpeg
             .input(str(video_path))
             .output(
                 pattern,
-                vf=vf,
-                vsync="vfr",
-                **{"qscale:v": 2},
+                **out_kwargs,
             )
             .overwrite_output()
             .run(quiet=True)
@@ -141,6 +167,19 @@ def _resize_if_needed(frame_bgr: np.ndarray, max_width: int = 1280) -> np.ndarra
     return cv2.resize(frame_bgr, new_size, interpolation=cv2.INTER_AREA)
 
 
+def _is_dark(frame_bgr: np.ndarray, *, value_threshold: int = 16, ratio_threshold: float = 0.98) -> bool:
+    """Return True if the frame is mostly dark.
+
+    value_threshold: pixels with V (HSV) below this [0-255] are considered dark
+    ratio_threshold: if >= this ratio of pixels are dark, consider frame dark
+    """
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    v = hsv[:, :, 2]
+    dark = (v < value_threshold)
+    ratio = float(np.count_nonzero(dark)) / float(v.size)
+    return ratio >= ratio_threshold
+
+
 def extract_keyframes_opencv(
     video_path: Path,
     output_dir: Path,
@@ -148,6 +187,15 @@ def extract_keyframes_opencv(
     scene_threshold: float = 0.45,
     method: str = "scene",
     interval_sec: float = 5.0,
+    output_format: str = "jpg",
+    jpeg_quality: int = 90,
+    max_width: int = 1280,
+    max_frames: Optional[int] = None,
+    skip_dark: bool = False,
+    dark_pixel_value: int = 16,
+    dark_ratio_threshold: float = 0.98,
+    dedupe: bool = False,
+    dedupe_similarity: float = 0.995,
     *,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> List[Path]:
@@ -170,12 +218,29 @@ def extract_keyframes_opencv(
         flush=True,
     )
 
+    # Normalize output format and writer params
+    ext = output_format.lower().lstrip(".")
+    if ext == "jpeg":
+        ext = "jpg"
+    if ext not in {"jpg", "png", "webp"}:
+        ext = "jpg"
+    write_params = []
+    if ext == "jpg":
+        write_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(max(0, min(100, jpeg_quality)))]
+    elif ext == "webp":
+        write_params = [int(cv2.IMWRITE_WEBP_QUALITY), int(max(1, min(100, jpeg_quality)))]
+    elif ext == "png":
+        # Map quality 0-100 to PNG compression 9-0 (higher quality -> lower compression)
+        compression = int(round((100 - max(0, min(100, jpeg_quality))) / 100.0 * 9))
+        write_params = [int(cv2.IMWRITE_PNG_COMPRESSION), int(max(0, min(9, compression)))]
+
     if method == "interval":
         eff_interval = interval_sec if interval_sec and interval_sec > 0 else 5.0
         step = max(1, int(fps * eff_interval))
         frame_idx = 0
         saved_paths: List[Path] = []
         keyframe_idx = 0
+        last_saved_hist = None
         expected = frame_count // step if frame_count > 0 else None
         bar = tqdm(total=expected, desc="Keyframes", unit="frame", leave=False)
         while True:
@@ -185,15 +250,32 @@ def extract_keyframes_opencv(
             if frame_idx % step == 0:
                 ret, frame = cap.retrieve()
                 if ret and frame is not None:
-                    frame_resized = _resize_if_needed(frame)
-                    out_path = output_dir / f"frame_{keyframe_idx:06d}.jpg"
-                    cv2.imwrite(str(out_path), frame_resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-                    saved_paths.append(out_path)
-                    keyframe_idx += 1
-                    bar.update(1)
-                    if progress_cb and expected:
-                        pct = max(0.0, min(100.0, (bar.n / expected) * 100.0))
-                        progress_cb(pct)
+                    if skip_dark and _is_dark(frame, value_threshold=dark_pixel_value, ratio_threshold=dark_ratio_threshold):
+                        # Skip dark frames
+                        pass
+                    else:
+                        if dedupe:
+                            hist = _compute_histogram(frame)
+                            if last_saved_hist is not None:
+                                corr = cv2.compareHist(last_saved_hist, hist, cv2.HISTCMP_CORREL)
+                                if float(corr) >= dedupe_similarity:
+                                    # Too similar to last saved; skip
+                                    pass
+                                else:
+                                    last_saved_hist = hist
+                            else:
+                                last_saved_hist = hist
+                        frame_resized = _resize_if_needed(frame, max_width=max_width)
+                        out_path = output_dir / f"frame_{keyframe_idx:06d}.{ext}"
+                        cv2.imwrite(str(out_path), frame_resized, write_params)
+                        saved_paths.append(out_path)
+                        keyframe_idx += 1
+                        bar.update(1)
+                        if progress_cb and expected:
+                            pct = max(0.0, min(100.0, (bar.n / expected) * 100.0))
+                            progress_cb(pct)
+                        if max_frames and len(saved_paths) >= max_frames:
+                            break
             frame_idx += 1
         cap.release()
         bar.close()
@@ -206,6 +288,7 @@ def extract_keyframes_opencv(
 
     saved_paths: List[Path] = []
     prev_hist = None
+    last_saved_hist = None
     frame_idx = 0
     keyframe_idx = 0
     expected = (frame_count // frame_interval) if frame_count > 0 else None
@@ -230,12 +313,27 @@ def extract_keyframes_opencv(
             diff = 1.0 - float(corr)
 
         if prev_hist is None or diff >= scene_threshold:
-            frame_resized = _resize_if_needed(frame)
-            out_path = output_dir / f"frame_{keyframe_idx:06d}.jpg"
-            cv2.imwrite(str(out_path), frame_resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-            saved_paths.append(out_path)
-            keyframe_idx += 1
-            prev_hist = hist
+            if skip_dark and _is_dark(frame, value_threshold=dark_pixel_value, ratio_threshold=dark_ratio_threshold):
+                # Skip dark frames
+                pass
+            else:
+                if dedupe and last_saved_hist is not None:
+                    corr_saved = cv2.compareHist(last_saved_hist, hist, cv2.HISTCMP_CORREL)
+                    if float(corr_saved) >= dedupe_similarity:
+                        # Too similar to last saved; skip
+                        pass
+                    else:
+                        last_saved_hist = hist
+                else:
+                    last_saved_hist = hist
+                frame_resized = _resize_if_needed(frame, max_width=max_width)
+                out_path = output_dir / f"frame_{keyframe_idx:06d}.{ext}"
+                cv2.imwrite(str(out_path), frame_resized, write_params)
+                saved_paths.append(out_path)
+                keyframe_idx += 1
+                prev_hist = hist
+                if max_frames and len(saved_paths) >= max_frames:
+                    break
 
         frame_idx += 1
         if expected is not None:
@@ -258,26 +356,134 @@ def extract_keyframes(
     scene_threshold: float = 0.45,
     method: str = "scene",
     interval_sec: float = 5.0,
+    output_format: str = "jpg",
+    jpeg_quality: int = 90,
+    max_width: int = 1280,
+    max_frames: Optional[int] = None,
+    skip_dark: bool = False,
+    dark_pixel_value: int = 16,
+    dark_ratio_threshold: float = 0.98,
+    dedupe: bool = False,
+    dedupe_similarity: float = 0.995,
     *,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> List[Path]:
-    try:
-        return extract_keyframes_ffmpeg(
-            video_path,
-            output_dir,
-            max_fps=max_fps,
-            scene_threshold=scene_threshold,
-            method=method,
-            interval_sec=interval_sec,
-            progress_cb=progress_cb,
-        )
-    except Exception:
-        return extract_keyframes_opencv(
-            video_path,
-            output_dir,
-            max_fps=max_fps,
-            scene_threshold=scene_threshold,
-            method=method,
-            interval_sec=interval_sec,
-            progress_cb=progress_cb,
-        )
+    # Prefer ffmpeg path unless dark-skip or dedupe is requested (handled in OpenCV).
+    prefer_opencv = skip_dark or dedupe
+    if not prefer_opencv:
+        try:
+            return extract_keyframes_ffmpeg(
+                video_path,
+                output_dir,
+                max_fps=max_fps,
+                scene_threshold=scene_threshold,
+                method=method,
+                interval_sec=interval_sec,
+                output_format=output_format,
+                jpeg_quality=jpeg_quality,
+                max_width=max_width,
+                max_frames=max_frames,
+                progress_cb=progress_cb,
+            )
+        except Exception:
+            pass
+
+    return extract_keyframes_opencv(
+        video_path,
+        output_dir,
+        max_fps=max_fps,
+        scene_threshold=scene_threshold,
+        method=method,
+        interval_sec=interval_sec,
+        output_format=output_format,
+        jpeg_quality=jpeg_quality,
+        max_width=max_width,
+        max_frames=max_frames,
+        skip_dark=skip_dark,
+        dark_pixel_value=dark_pixel_value,
+        dark_ratio_threshold=dark_ratio_threshold,
+        dedupe=dedupe,
+        dedupe_similarity=dedupe_similarity,
+        progress_cb=progress_cb,
+    )
+
+
+def build_contact_sheet(
+    image_paths: Sequence[Path],
+    output_path: Path,
+    *,
+    columns: int = 5,
+    thumb_width: int = 320,
+    padding: int = 10,
+    bg_color: tuple[int, int, int] = (255, 255, 255),
+    title: Optional[str] = None,
+    title_height: int = 0,
+) -> Path:
+    """Create a contact sheet image from a list of image paths.
+
+    Returns the path to the generated contact sheet.
+    """
+    paths = [Path(p) for p in image_paths if Path(p).exists()]
+    if not paths:
+        raise ValueError("No valid image paths provided")
+    columns = max(1, int(columns))
+    thumb_width = max(16, int(thumb_width))
+    padding = max(0, int(padding))
+
+    # Load and resize thumbs keeping aspect ratio
+    thumbs: List[np.ndarray] = []
+    max_thumb_height = 0
+    for p in paths:
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        scale = thumb_width / float(w)
+        new_size = (thumb_width, int(round(h * scale)))
+        thumb = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+        thumbs.append(thumb)
+        if thumb.shape[0] > max_thumb_height:
+            max_thumb_height = thumb.shape[0]
+    if not thumbs:
+        raise ValueError("Failed to load any images for contact sheet")
+
+    rows = (len(thumbs) + columns - 1) // columns
+    cell_w = thumb_width
+    cell_h = max_thumb_height
+    sheet_w = padding + columns * (cell_w + padding)
+    sheet_h = padding + rows * (cell_h + padding) + title_height
+
+    sheet = np.full((sheet_h, sheet_w, 3), bg_color, dtype=np.uint8)
+
+    if title and title_height > 0:
+        try:
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            thickness = 2
+            size, _ = cv2.getTextSize(title, font, font_scale, thickness)
+            tx = max(0, (sheet_w - size[0]) // 2)
+            ty = min(title_height - 5, max(5, (title_height + size[1]) // 2))
+            cv2.putText(sheet, title, (tx, ty), font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
+        except Exception:
+            pass
+
+    y = padding + title_height
+    x = padding
+    col = 0
+    for thumb in thumbs:
+        h, w = thumb.shape[:2]
+        # Vertically center inside the cell
+        y_offset = y + max(0, (cell_h - h) // 2)
+        sheet[y_offset:y_offset + h, x:x + w] = thumb
+        col += 1
+        if col >= columns:
+            col = 0
+            x = padding
+            y += cell_h + padding
+        else:
+            x += cell_w + padding
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), sheet)
+    return output_path
