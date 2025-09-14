@@ -63,6 +63,10 @@ def classify_frames(
     snippets_dir: Path,
     *,
     progress_cb: Optional[Callable[[float], None]] = None,
+    ocr_languages: Optional[List[str]] = None,
+    skip_blurry: bool = False,
+    blurry_threshold: float = 60.0,
+    max_per_category: Optional[int] = None,
 ) -> Dict[str, List[Path]]:
     classified_root = Path(classified_root)
     (classified_root / "code").mkdir(parents=True, exist_ok=True)
@@ -87,12 +91,35 @@ def classify_frames(
     def get_reader() -> easyocr.Reader:
         rdr = getattr(thread_local, "reader", None)
         if rdr is None:
-            rdr = easyocr.Reader(["en"], gpu=use_gpu)
+            langs = ["en"]
+            if ocr_languages:
+                try:
+                    langs = [l for l in ocr_languages if isinstance(l, str) and l]
+                    if not langs:
+                        langs = ["en"]
+                except Exception:
+                    langs = ["en"]
+            try:
+                rdr = easyocr.Reader(langs, gpu=use_gpu)
+            except Exception:
+                rdr = easyocr.Reader(["en"], gpu=use_gpu)
             thread_local.reader = rdr
         return rdr
 
+    def _is_blurry(image_path: Path) -> bool:
+        try:
+            img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                return False
+            fm = cv2.Laplacian(img, cv2.CV_64F).var()
+            return fm < blurry_threshold
+        except Exception:
+            return False
+
     def process_one(args: tuple[int, Path]) -> None:
         idx, frame_path = args
+        if skip_blurry and _is_blurry(frame_path):
+            return
         reader = get_reader()
         ocr_result = reader.readtext(str(frame_path), detail=1, paragraph=True)
         texts = [entry[1] for entry in ocr_result if isinstance(entry, (list, tuple)) and len(entry) >= 2]
@@ -102,19 +129,24 @@ def classify_frames(
         looks_like_code = density > 0.2 and _contains_any(text, _CODE_TOKENS)
         looks_like_plot = _contains_any(text, _PLOT_TOKENS) or _detect_plot_lines(frame_path) > 0.4
 
-        if looks_like_code and not looks_like_plot:
+        def _can_add(cat: str) -> bool:
+            if max_per_category is None or max_per_category <= 0:
+                return True
+            return len(result.get(cat, [])) < max_per_category
+
+        if looks_like_code and not looks_like_plot and _can_add("code"):
             target = classified_root / "code" / frame_path.name
             shutil.copy2(frame_path, target)
             with lock:
                 result["code"].append(target)
             snippet_file = snippets_dir / f"snippet_{idx:04d}.txt"
             snippet_file.write_text(text, encoding="utf-8")
-        elif looks_like_plot:
+        elif looks_like_plot and _can_add("plots"):
             target = classified_root / "plots" / frame_path.name
             shutil.copy2(frame_path, target)
             with lock:
                 result["plots"].append(target)
-        else:
+        elif _can_add("images"):
             target = classified_root / "images" / frame_path.name
             shutil.copy2(frame_path, target)
             with lock:
