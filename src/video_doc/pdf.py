@@ -44,6 +44,7 @@ def build_pdf_report(
     progress_cb: Optional[Callable[[float], None]] = None,
     report_style: str = "minimal",
     video_title: str = "Video Report",
+    contact_sheet_path: Optional[Path] = None,
 ) -> Path:
     output_pdf_path = Path(output_pdf_path)
     output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +215,22 @@ def build_pdf_report(
                     flow.append(Spacer(1, 0.12 * inch))
 
         # Optional sections
+        # Contact sheet at top of visuals if provided
+        max_img_width = A4[0] - (doc.leftMargin + doc.rightMargin)
+        if contact_sheet_path and Path(contact_sheet_path).exists():
+            try:
+                flow.append(Paragraph("Keyframes Overview", getSampleStyleSheet()["Heading2"]))
+                flow.append(Spacer(1, 0.15 * inch))
+                img = Image(str(contact_sheet_path))
+                w, h = img.wrap(0, 0)
+                if w > max_img_width:
+                    scale = max_img_width / w
+                    img.drawWidth = w * scale
+                    img.drawHeight = h * scale
+                flow.append(img)
+                flow.append(PageBreak())
+            except Exception:
+                pass
         snippets_dir = Path(output_dir) / "snippets" / "code"
         code_snippets = sorted(snippets_dir.glob("*.txt"))
         plots_list = classification_result.get("plots", [])
@@ -340,6 +357,22 @@ def build_pdf_report(
                     flow.append(Spacer(1, 0.08 * inch))
 
         # Optional sections
+        # Contact sheet immediately before visuals if provided
+        max_img_width = A4[0] - (doc.leftMargin + doc.rightMargin)
+        if contact_sheet_path and Path(contact_sheet_path).exists():
+            try:
+                flow.append(PageBreak())
+                flow.append(Paragraph("Keyframes Overview", styles["Heading1"]))
+                flow.append(Spacer(1, 0.12 * inch))
+                img = Image(str(contact_sheet_path))
+                w, h = img.wrap(0, 0)
+                if w > max_img_width:
+                    scale = max_img_width / w
+                    img.drawWidth = w * scale
+                    img.drawHeight = h * scale
+                flow.append(img)
+            except Exception:
+                pass
         snippets_dir = Path(output_dir) / "snippets" / "code"
         code_snippets = sorted(snippets_dir.glob("*.txt"))
         plots_list = classification_result.get("plots", [])
