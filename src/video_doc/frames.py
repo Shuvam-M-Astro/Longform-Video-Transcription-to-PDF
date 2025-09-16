@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 import re
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def _probe_duration_seconds(video_path: Path) -> float | None:
@@ -234,6 +236,11 @@ def extract_keyframes_opencv(
         compression = int(round((100 - max(0, min(100, jpeg_quality))) / 100.0 * 9))
         write_params = [int(cv2.IMWRITE_PNG_COMPRESSION), int(max(0, min(9, compression)))]
 
+    # Thread pool for parallel disk writes (CPU-bound IO) to speed up saving frames
+    max_io_workers = min(8, max(2, (os.cpu_count() or 2)))
+    io_executor = ThreadPoolExecutor(max_workers=max_io_workers)
+    io_futures = []
+
     if method == "interval":
         eff_interval = interval_sec if interval_sec and interval_sec > 0 else 5.0
         step = max(1, int(fps * eff_interval))
@@ -267,7 +274,8 @@ def extract_keyframes_opencv(
                                 last_saved_hist = hist
                         frame_resized = _resize_if_needed(frame, max_width=max_width)
                         out_path = output_dir / f"frame_{keyframe_idx:06d}.{ext}"
-                        cv2.imwrite(str(out_path), frame_resized, write_params)
+                        # Offload disk write to thread pool
+                        io_futures.append(io_executor.submit(cv2.imwrite, str(out_path), frame_resized, write_params))
                         saved_paths.append(out_path)
                         keyframe_idx += 1
                         bar.update(1)
@@ -278,6 +286,10 @@ def extract_keyframes_opencv(
                             break
             frame_idx += 1
         cap.release()
+        # Ensure all pending writes complete before returning paths
+        for _ in as_completed(io_futures):
+            pass
+        io_executor.shutdown(wait=True)
         bar.close()
         if progress_cb:
             progress_cb(100.0)
@@ -328,7 +340,8 @@ def extract_keyframes_opencv(
                     last_saved_hist = hist
                 frame_resized = _resize_if_needed(frame, max_width=max_width)
                 out_path = output_dir / f"frame_{keyframe_idx:06d}.{ext}"
-                cv2.imwrite(str(out_path), frame_resized, write_params)
+                # Offload disk write to thread pool
+                io_futures.append(io_executor.submit(cv2.imwrite, str(out_path), frame_resized, write_params))
                 saved_paths.append(out_path)
                 keyframe_idx += 1
                 prev_hist = hist
@@ -343,6 +356,10 @@ def extract_keyframes_opencv(
                 progress_cb(pct)
 
     cap.release()
+    # Ensure all pending writes complete before returning paths
+    for _ in as_completed(io_futures):
+        pass
+    io_executor.shutdown(wait=True)
     bar.close()
     if progress_cb:
         progress_cb(100.0)
@@ -430,20 +447,32 @@ def build_contact_sheet(
     thumb_width = max(16, int(thumb_width))
     padding = max(0, int(padding))
 
-    # Load and resize thumbs keeping aspect ratio
+    # Load and resize thumbs keeping aspect ratio (parallelized IO + resize)
     thumbs: List[np.ndarray] = []
     max_thumb_height = 0
-    for p in paths:
+    def _load_and_resize(p: Path):
         img = cv2.imread(str(p))
         if img is None:
-            continue
+            return None
         h, w = img.shape[:2]
         scale = thumb_width / float(w)
         new_size = (thumb_width, int(round(h * scale)))
         thumb = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
-        thumbs.append(thumb)
-        if thumb.shape[0] > max_thumb_height:
-            max_thumb_height = thumb.shape[0]
+        return thumb
+
+    max_workers = min(8, max(2, (os.cpu_count() or 2)))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_load_and_resize, p) for p in paths]
+        for fut in futures:
+            try:
+                thumb = fut.result()
+                if thumb is None:
+                    continue
+                thumbs.append(thumb)
+                if thumb.shape[0] > max_thumb_height:
+                    max_thumb_height = thumb.shape[0]
+            except Exception:
+                continue
     if not thumbs:
         raise ValueError("Failed to load any images for contact sheet")
 

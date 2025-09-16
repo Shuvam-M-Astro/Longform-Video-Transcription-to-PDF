@@ -7,6 +7,7 @@ from typing import List, Optional, Callable
 import wave
 
 from faster_whisper import WhisperModel
+import os
 
 
 @dataclass
@@ -32,7 +33,17 @@ def _init_model(model_size: str, prefer_cuda: bool) -> WhisperModel:
             return WhisperModel(model_size, device="cuda", compute_type="float16")
         except Exception as e:
             print(f"[transcribe] GPU init failed ({e}). Falling back to CPU...")
-    return WhisperModel(model_size, device="cpu", compute_type="int8")
+    # Enable CPU parallelism where possible
+    # Respect environment overrides for thread counts
+    cpu_threads = int(os.environ.get("WHISPER_CPU_THREADS", str(max(2, (os.cpu_count() or 2)))))
+    num_workers = int(os.environ.get("WHISPER_NUM_WORKERS", "1"))
+    return WhisperModel(
+        model_size,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=cpu_threads,
+        num_workers=num_workers,
+    )
 
 
 def transcribe_audio(
