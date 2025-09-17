@@ -27,16 +27,18 @@ def _select_compute_type() -> str:
     return "int8"
 
 
-def _init_model(model_size: str, prefer_cuda: bool) -> WhisperModel:
+def _init_model(model_size: str, prefer_cuda: bool, *, cpu_threads: Optional[int] = None, num_workers: Optional[int] = None) -> WhisperModel:
     if prefer_cuda:
         try:
             return WhisperModel(model_size, device="cuda", compute_type="float16")
         except Exception as e:
             print(f"[transcribe] GPU init failed ({e}). Falling back to CPU...")
     # Enable CPU parallelism where possible
-    # Respect environment overrides for thread counts
-    cpu_threads = int(os.environ.get("WHISPER_CPU_THREADS", str(max(2, (os.cpu_count() or 2)))))
-    num_workers = int(os.environ.get("WHISPER_NUM_WORKERS", "1"))
+    # Respect CLI overrides first, then environment variables
+    if cpu_threads is None:
+        cpu_threads = int(os.environ.get("WHISPER_CPU_THREADS", str(max(2, (os.cpu_count() or 2)))))
+    if num_workers is None:
+        num_workers = int(os.environ.get("WHISPER_NUM_WORKERS", "1"))
     return WhisperModel(
         model_size,
         device="cpu",
@@ -55,13 +57,16 @@ def transcribe_audio(
     model_size: str = "medium",
     *,
     progress_cb: Optional[Callable[[float], None]] = None,
+    cpu_threads: Optional[int] = None,
+    num_workers: Optional[int] = None,
+    srt_path: Optional[Path] = None,
 ) -> List[TranscriptSegment]:
     transcript_txt_path.parent.mkdir(parents=True, exist_ok=True)
     segments_json_path.parent.mkdir(parents=True, exist_ok=True)
 
     compute_type = _select_compute_type()
     prefer_cuda = compute_type == "float16"
-    model = _init_model(model_size, prefer_cuda)
+    model = _init_model(model_size, prefer_cuda, cpu_threads=cpu_threads, num_workers=num_workers)
     print(
         f"[transcribe] Initialized model: size={model_size} device={'cuda' if prefer_cuda else 'cpu'} compute_type={compute_type}",
         flush=True,
@@ -84,7 +89,7 @@ def transcribe_audio(
         msg = str(e).lower()
         if prefer_cuda and ("cublas" in msg or "cuda" in msg or "cudnn" in msg):
             print(f"[transcribe] CUDA error during transcription ({e}). Retrying on CPU...")
-            model = _init_model(model_size, prefer_cuda=False)
+            model = _init_model(model_size, prefer_cuda=False, cpu_threads=cpu_threads, num_workers=num_workers)
             segments_iter, info = _do_transcribe(model)
         else:
             raise
@@ -123,6 +128,28 @@ def transcribe_audio(
 
     with open(segments_json_path, "w", encoding="utf-8") as f_json:
         json.dump([asdict(s) for s in segments], f_json, ensure_ascii=False, indent=2)
+
+    # Optional SRT export
+    if srt_path is not None:
+        try:
+            srt_path = Path(srt_path)
+            srt_path.parent.mkdir(parents=True, exist_ok=True)
+            def _fmt_time(t: float) -> str:
+                # HH:MM:SS,mmm
+                hours = int(t // 3600)
+                minutes = int((t % 3600) // 60)
+                seconds = int(t % 60)
+                millis = int(round((t - int(t)) * 1000))
+                return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+            lines: List[str] = []
+            for idx, seg in enumerate(segments, start=1):
+                lines.append(str(idx))
+                lines.append(f"{_fmt_time(seg.start)} --> { _fmt_time(seg.end)}")
+                lines.append(seg.text or "")
+                lines.append("")
+            srt_path.write_text("\n".join(lines), encoding="utf-8")
+        except Exception as e:
+            print(f"[transcribe] Failed to write SRT: {e}")
 
     if progress_cb:
         progress_cb(100.0)
