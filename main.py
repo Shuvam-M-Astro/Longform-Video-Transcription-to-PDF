@@ -39,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--language", type=str, default="auto", help="Language code or 'auto'")
     parser.add_argument("--beam-size", type=int, default=5, help="Beam size for decoding")
     parser.add_argument("--whisper-model", type=str, default="medium", help="faster-whisper model size")
+    parser.add_argument("--whisper-cpu-threads", type=int, default=0, help="Override faster-whisper CPU threads; 0=auto")
+    parser.add_argument("--whisper-num-workers", type=int, default=1, help="Number of CPU decoder workers (>=1)")
     parser.add_argument("--max-fps", type=float, default=1.0, help="Max FPS for keyframe detection (scene method)")
     parser.add_argument("--min-scene-diff", type=float, default=0.45, help="Scene change threshold [0-1]")
     parser.add_argument("--kf-method", type=str, choices=["scene", "iframe", "interval"], default="scene", help="Keyframe extraction method")
@@ -65,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--streaming", action="store_true", help="Process via streaming without saving full video")
     parser.add_argument("--pipeline-mode", type=str, choices=["transcribe-only", "full"], default="transcribe-only", help="Pipeline mode")
     parser.add_argument("--transcribe-only", action="store_true", help="Skip frames/classification; transcript-only PDF (compat)")
+    parser.add_argument("--export-srt", action="store_true", help="Also export transcript in SubRip (.srt)")
+    parser.add_argument("--resume", action="store_true", help="Resume: do not clean output, reuse existing artifacts")
     # Download auth/bypass options
     parser.add_argument("--cookies-from-browser", type=str, default=None, help="Browser to read cookies from (chrome|edge|brave|firefox)")
     parser.add_argument("--browser-profile", type=str, default=None, help="Specific browser profile name, e.g., 'Default' or 'Profile 1'")
@@ -94,8 +98,8 @@ def main() -> None:
     if getattr(args, "video", None):
         args.streaming = False
     output_dir = Path(args.out)
-    # Clean output directory before running
-    if output_dir.exists():
+    # Clean output directory before running, unless resume is requested
+    if output_dir.exists() and not getattr(args, "resume", False):
         print(f"Cleaning output directory: {output_dir}", flush=True)
         shutil.rmtree(output_dir, ignore_errors=True)
     ensure_dirs(output_dir)
@@ -277,7 +281,9 @@ def main() -> None:
         if getattr(args, "video", None):
             print(f"Using local video file: {video_path}", flush=True)
         else:
-            if not args.skip_download or not video_path.exists():
+            if not args.skip_download and video_path.exists() and getattr(args, "resume", False):
+                print(f"Reusing existing video: {video_path}", flush=True)
+            elif not args.skip_download or not video_path.exists():
                 print("Downloading full video (mp4)...", flush=True)
                 progress.start_step("Download video", 20)
                 download_video(
@@ -290,18 +296,21 @@ def main() -> None:
                     progress_cb=lambda p: progress.update(p),
                 )
                 progress.end_step()
-        print("Extracting audio from file...", flush=True)
-        progress.start_step("Extract audio", 10)
-        extract_audio_wav(
-            video_path,
-            audio_path,
-            progress_cb=lambda p: progress.update(p),
-            start_time=args.trim_start,
-            end_trim=args.trim_end,
-            volume_gain_db=args.volume_gain,
-        )
-        progress.end_step()
-        print(f"Audio saved: {audio_path}", flush=True)
+        if audio_path.exists() and getattr(args, "resume", False):
+            print(f"Reusing existing audio: {audio_path}", flush=True)
+        else:
+            print("Extracting audio from file...", flush=True)
+            progress.start_step("Extract audio", 10)
+            extract_audio_wav(
+                video_path,
+                audio_path,
+                progress_cb=lambda p: progress.update(p),
+                start_time=args.trim_start,
+                end_trim=args.trim_end,
+                volume_gain_db=args.volume_gain,
+            )
+            progress.end_step()
+            print(f"Audio saved: {audio_path}", flush=True)
         if not args.transcribe_only:
             print("Extracting keyframes from file...", flush=True)
             print(
@@ -309,83 +318,125 @@ def main() -> None:
                 f"min_scene_diff={args.min_scene_diff} interval_sec={args.kf_interval_sec}",
                 flush=True,
             )
-            progress.start_step("Keyframes", 20)
-            keyframe_paths = extract_keyframes(
-                video_path=video_path,
-                output_dir=frames_dir,
-                max_fps=args.max_fps,
-                scene_threshold=args.min_scene_diff,
-                method=args.kf_method,
-                interval_sec=args.kf_interval_sec,
-                output_format=args.frame_format,
-                jpeg_quality=args.frame_quality,
-                max_width=args.frame_max_width,
-                max_frames=(args.frame_max_frames if args.frame_max_frames > 0 else None),
-                skip_dark=args.skip_dark,
-                dark_pixel_value=args.dark_value,
-                dark_ratio_threshold=args.dark_ratio,
-                dedupe=args.dedupe,
-                dedupe_similarity=args.dedupe_sim,
-                progress_cb=lambda p: progress.update(p),
-            )
-            progress.end_step()
-            print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
+            existing_frames = sorted(frames_dir.glob("frame_*.jpg"))
+            if existing_frames and getattr(args, "resume", False):
+                keyframe_paths = existing_frames
+                print(f"Reusing existing keyframes: {len(keyframe_paths)}", flush=True)
+            else:
+                progress.start_step("Keyframes", 20)
+                keyframe_paths = extract_keyframes(
+                    video_path=video_path,
+                    output_dir=frames_dir,
+                    max_fps=args.max_fps,
+                    scene_threshold=args.min_scene_diff,
+                    method=args.kf_method,
+                    interval_sec=args.kf_interval_sec,
+                    output_format=args.frame_format,
+                    jpeg_quality=args.frame_quality,
+                    max_width=args.frame_max_width,
+                    max_frames=(args.frame_max_frames if args.frame_max_frames > 0 else None),
+                    skip_dark=args.skip_dark,
+                    dark_pixel_value=args.dark_value,
+                    dark_ratio_threshold=args.dark_ratio,
+                    dedupe=args.dedupe,
+                    dedupe_similarity=args.dedupe_sim,
+                    progress_cb=lambda p: progress.update(p),
+                )
+                progress.end_step()
+                print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
             # Contact sheet
             if args.contact_sheet and keyframe_paths:
                 print("Building contact sheet...", flush=True)
                 cs_path = frames_dir.parent / "contact_sheet.jpg"
                 try:
-                    build_contact_sheet(
-                        image_paths=keyframe_paths,
-                        output_path=cs_path,
-                        columns=args.cs_columns,
-                        thumb_width=args.cs_thumb_width,
-                        padding=args.cs_padding,
-                        title=(args.cs_title or video_title),
-                        title_height=args.cs_title_height,
-                    )
-                    print(f"Contact sheet saved: {cs_path}", flush=True)
+                    if cs_path.exists() and getattr(args, "resume", False):
+                        print(f"Reusing existing contact sheet: {cs_path}", flush=True)
+                    else:
+                        build_contact_sheet(
+                            image_paths=keyframe_paths,
+                            output_path=cs_path,
+                            columns=args.cs_columns,
+                            thumb_width=args.cs_thumb_width,
+                            padding=args.cs_padding,
+                            title=(args.cs_title or video_title),
+                            title_height=args.cs_title_height,
+                        )
+                        print(f"Contact sheet saved: {cs_path}", flush=True)
                 except Exception as e:
                     print(f"Contact sheet failed: {e}", flush=True)
 
     transcript_txt = transcript_dir / "transcript.txt"
     segments_json = transcript_dir / "segments.json"
-    print(f"Transcribing audio with model={args.whisper_model}, beam_size={args.beam_size}...", flush=True)
-    progress.start_step("Transcribe", 40)
-    segments = transcribe_audio(
-        audio_path=audio_path,
-        transcript_txt_path=transcript_txt,
-        segments_json_path=segments_json,
-        language=args.language,
-        beam_size=args.beam_size,
-        model_size=args.whisper_model,
-        progress_cb=lambda p: progress.update(p),
-    )
-    progress.end_step()
-    print(f"Transcription done: {len(segments)} segments", flush=True)
+    srt_path = transcript_dir / "transcript.srt" if args.export_srt else None
+    if getattr(args, "resume", False) and transcript_txt.exists() and segments_json.exists() and (not args.export_srt or (srt_path and srt_path.exists())):
+        print("Reusing existing transcript artifacts", flush=True)
+        try:
+            with open(segments_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            segments = [
+                type("TS", (), {"start": float(s.get("start", 0.0)), "end": float(s.get("end", 0.0)), "text": str(s.get("text", ""))})
+                for s in data if isinstance(s, dict)
+            ]
+        except Exception:
+            segments = []
+    else:
+        print(f"Transcribing audio with model={args.whisper_model}, beam_size={args.beam_size}...", flush=True)
+        progress.start_step("Transcribe", 40)
+        segments = transcribe_audio(
+            audio_path=audio_path,
+            transcript_txt_path=transcript_txt,
+            segments_json_path=segments_json,
+            language=args.language,
+            beam_size=args.beam_size,
+            model_size=args.whisper_model,
+            progress_cb=lambda p: progress.update(p),
+            cpu_threads=(args.whisper_cpu_threads if args.whisper_cpu_threads and args.whisper_cpu_threads > 0 else None),
+            num_workers=(args.whisper_num_workers if args.whisper_num_workers and args.whisper_num_workers > 0 else None),
+            srt_path=srt_path,
+        )
+        progress.end_step()
+        print(f"Transcription done: {len(segments)} segments", flush=True)
 
     if args.transcribe_only:
         classification_result = {"code": [], "plots": [], "images": []}
     else:
         print("Classifying frames...", flush=True)
-        progress.start_step("Classify frames", 5)
-        classification_result = classify_frames(
-            frame_paths=keyframe_paths,
-            classified_root=classified_dir,
-            snippets_dir=snippets_dir,
-            progress_cb=lambda p: progress.update(p),
-            ocr_languages=[lang.strip() for lang in str(args.ocr_langs).split(',') if lang.strip()],
-            skip_blurry=args.skip_blurry,
-            blurry_threshold=args.blurry_threshold,
-            max_per_category=(args.max_per_category if args.max_per_category > 0 else None),
-        )
-        progress.end_step()
-        print(
-            f"Classified - code: {len(classification_result.get('code', []))}, "
-            f"plots: {len(classification_result.get('plots', []))}, "
-            f"images: {len(classification_result.get('images', []))}",
-            flush=True,
-        )
+        manifest_path = classified_dir / "classification_result.json"
+        if getattr(args, "resume", False) and manifest_path.exists():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    classification_result = json.load(f)
+                # Normalize to lists of Paths
+                for k in ("code", "plots", "images"):
+                    classification_result[k] = [Path(p) for p in classification_result.get(k, [])]
+                print("Reusing existing classification manifest", flush=True)
+            except Exception:
+                classification_result = {"code": [], "plots": [], "images": []}
+        else:
+            progress.start_step("Classify frames", 5)
+            classification_result = classify_frames(
+                frame_paths=keyframe_paths,
+                classified_root=classified_dir,
+                snippets_dir=snippets_dir,
+                progress_cb=lambda p: progress.update(p),
+                ocr_languages=[lang.strip() for lang in str(args.ocr_langs).split(',') if lang.strip()],
+                skip_blurry=args.skip_blurry,
+                blurry_threshold=args.blurry_threshold,
+                max_per_category=(args.max_per_category if args.max_per_category > 0 else None),
+            )
+            progress.end_step()
+            # Write manifest
+            try:
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump({k: [str(p) for p in v] for k, v in classification_result.items()}, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            print(
+                f"Classified - code: {len(classification_result.get('code', []))}, "
+                f"plots: {len(classification_result.get('plots', []))}, "
+                f"images: {len(classification_result.get('images', []))}",
+                flush=True,
+            )
 
     print("Building PDF report...", flush=True)
     progress.start_step("Build PDF", 5)
@@ -398,19 +449,24 @@ def main() -> None:
     except Exception:
         contact_sheet_path = None
 
-    build_pdf_report(
-        output_pdf_path=report_pdf_path,
-        transcript_txt_path=transcript_txt,
-        segments_json_path=segments_json,
-        classification_result=classification_result,
-        output_dir=output_dir,
-        progress_cb=lambda p: progress.update(p),
-        report_style=args.report_style,
-        video_title=video_title,
-        contact_sheet_path=contact_sheet_path,
-    )
-    progress.end_step()
-    print(f"Report ready: {report_pdf_path}", flush=True)
+    if getattr(args, "resume", False) and report_pdf_path.exists():
+        print(f"Reusing existing report: {report_pdf_path}", flush=True)
+        progress.update(100.0)
+        progress.end_step()
+    else:
+        build_pdf_report(
+            output_pdf_path=report_pdf_path,
+            transcript_txt_path=transcript_txt,
+            segments_json_path=segments_json,
+            classification_result=classification_result,
+            output_dir=output_dir,
+            progress_cb=lambda p: progress.update(p),
+            report_style=args.report_style,
+            video_title=video_title,
+            contact_sheet_path=contact_sheet_path,
+        )
+        progress.end_step()
+        print(f"Report ready: {report_pdf_path}", flush=True)
 
     print(json.dumps({
         "audio": str(audio_path),
