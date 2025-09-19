@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import re
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 
 def _probe_duration_seconds(video_path: Path) -> float | None:
@@ -150,7 +150,7 @@ def extract_keyframes_ffmpeg(
             .run(quiet=True)
         )
 
-    return sorted(output_dir.glob("frame_*.jpg"))
+    return sorted(output_dir.glob(f"frame_*.{ext}"))
 
 
 def _compute_histogram(frame_bgr: np.ndarray) -> np.ndarray:
@@ -237,9 +237,15 @@ def extract_keyframes_opencv(
         write_params = [int(cv2.IMWRITE_PNG_COMPRESSION), int(max(0, min(9, compression)))]
 
     # Thread pool for parallel disk writes (CPU-bound IO) to speed up saving frames
-    max_io_workers = min(8, max(2, (os.cpu_count() or 2)))
+    env_threads = os.environ.get("FRAME_IO_THREADS")
+    try:
+        max_io_workers = int(env_threads) if env_threads else min(8, max(2, (os.cpu_count() or 2)))
+    except Exception:
+        max_io_workers = min(8, max(2, (os.cpu_count() or 2)))
     io_executor = ThreadPoolExecutor(max_workers=max_io_workers)
-    io_futures = []
+    # Backlog control
+    max_backlog = max_io_workers * 3
+    pending: List = []  # list of (future, path)
 
     if method == "interval":
         eff_interval = interval_sec if interval_sec and interval_sec > 0 else 5.0
@@ -275,8 +281,24 @@ def extract_keyframes_opencv(
                         frame_resized = _resize_if_needed(frame, max_width=max_width)
                         out_path = output_dir / f"frame_{keyframe_idx:06d}.{ext}"
                         # Offload disk write to thread pool
-                        io_futures.append(io_executor.submit(cv2.imwrite, str(out_path), frame_resized, write_params))
-                        saved_paths.append(out_path)
+                        fut = io_executor.submit(cv2.imwrite, str(out_path), frame_resized, write_params)
+                        pending.append((fut, out_path))
+                        # Backpressure to cap memory/backlog
+                        if len(pending) >= max_backlog:
+                            done, _ = wait([f for f, _ in pending], return_when=FIRST_COMPLETED)
+                            # harvest completed
+                            still_pending = []
+                            for f, pth in pending:
+                                if f.done():
+                                    try:
+                                        ok = bool(f.result())
+                                        if ok:
+                                            saved_paths.append(pth)
+                                    except Exception:
+                                        pass
+                                else:
+                                    still_pending.append((f, pth))
+                            pending = still_pending
                         keyframe_idx += 1
                         bar.update(1)
                         if progress_cb and expected:
@@ -287,8 +309,13 @@ def extract_keyframes_opencv(
             frame_idx += 1
         cap.release()
         # Ensure all pending writes complete before returning paths
-        for _ in as_completed(io_futures):
-            pass
+        for f, pth in pending:
+            try:
+                ok = bool(f.result())
+                if ok:
+                    saved_paths.append(pth)
+            except Exception:
+                pass
         io_executor.shutdown(wait=True)
         bar.close()
         if progress_cb:
@@ -341,8 +368,23 @@ def extract_keyframes_opencv(
                 frame_resized = _resize_if_needed(frame, max_width=max_width)
                 out_path = output_dir / f"frame_{keyframe_idx:06d}.{ext}"
                 # Offload disk write to thread pool
-                io_futures.append(io_executor.submit(cv2.imwrite, str(out_path), frame_resized, write_params))
-                saved_paths.append(out_path)
+                fut = io_executor.submit(cv2.imwrite, str(out_path), frame_resized, write_params)
+                pending.append((fut, out_path))
+                # Backpressure to cap memory/backlog
+                if len(pending) >= max_backlog:
+                    done, _ = wait([f for f, _ in pending], return_when=FIRST_COMPLETED)
+                    still_pending = []
+                    for f, pth in pending:
+                        if f.done():
+                            try:
+                                ok = bool(f.result())
+                                if ok:
+                                    saved_paths.append(pth)
+                            except Exception:
+                                pass
+                        else:
+                            still_pending.append((f, pth))
+                    pending = still_pending
                 keyframe_idx += 1
                 prev_hist = hist
                 if max_frames and len(saved_paths) >= max_frames:
@@ -357,8 +399,13 @@ def extract_keyframes_opencv(
 
     cap.release()
     # Ensure all pending writes complete before returning paths
-    for _ in as_completed(io_futures):
-        pass
+    for f, pth in pending:
+        try:
+            ok = bool(f.result())
+            if ok:
+                saved_paths.append(pth)
+        except Exception:
+            pass
     io_executor.shutdown(wait=True)
     bar.close()
     if progress_cb:
@@ -460,7 +507,12 @@ def build_contact_sheet(
         thumb = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
         return thumb
 
-    max_workers = min(8, max(2, (os.cpu_count() or 2)))
+    # Allow overriding contact sheet parallelism via env var
+    cs_env = os.environ.get("CONTACT_SHEET_THREADS")
+    try:
+        max_workers = int(cs_env) if cs_env else min(8, max(2, (os.cpu_count() or 2)))
+    except Exception:
+        max_workers = min(8, max(2, (os.cpu_count() or 2)))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_load_and_resize, p) for p in paths]
         for fut in futures:
