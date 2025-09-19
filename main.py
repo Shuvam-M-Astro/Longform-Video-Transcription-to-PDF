@@ -236,7 +236,7 @@ def main() -> None:
                     raise RuntimeError("No video_url")
                 print("Extracting keyframes from stream...", flush=True)
                 progress.start_step("Keyframes (stream)", 20)
-                stream_extract_keyframes(
+                keyframe_paths = stream_extract_keyframes(
                     resolved["video_url"],
                     frames_dir,
                     max_fps=args.max_fps,
@@ -249,7 +249,6 @@ def main() -> None:
                     progress_cb=lambda p: progress.update(p),
                 )
                 progress.end_step()
-                keyframe_paths = sorted(frames_dir.glob("frame_*.jpg"))
                 print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
             except Exception:
                 print("Stream keyframes failed; downloading tiny MP4 for keyframes...", flush=True)
