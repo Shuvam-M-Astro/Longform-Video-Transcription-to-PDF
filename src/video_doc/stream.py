@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Callable
+from typing import Dict, Optional, Tuple, Callable, List
 
 import ffmpeg
 from yt_dlp import YoutubeDL
@@ -292,7 +292,7 @@ def stream_extract_keyframes(
     max_width: int = 1280,
     max_frames: Optional[int] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
-) -> None:
+) -> List[Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -380,3 +380,5 @@ def stream_extract_keyframes(
             .overwrite_output()
             .run(quiet=True)
         )
+    # Return sorted list of written files by computed extension
+    return sorted(output_dir.glob(f"frame_*.{ext}"))
