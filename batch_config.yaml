@@ -1,0 +1,43 @@
+# Batch Processing Configuration Template
+# Copy this file and modify as needed for your batch processing needs
+
+# Batch processing settings
+batch:
+  max_parallel: 2                    # Number of videos to process simultaneously
+  retry_failed: true                 # Retry failed videos
+  max_retries: 2                     # Maximum retry attempts
+  skip_existing: true                # Skip videos that already have output
+  stop_on_error: false               # Stop processing on first error
+  timeout_per_video: null            # Timeout per video in seconds (null for no timeout)
+  progress_interval: 5.0             # Progress update interval in seconds
+
+# Video processing settings
+processing:
+  transcribe_only: false             # Skip frames/classification; transcript-only PDF
+  language: "auto"                   # Language code or 'auto'
+  whisper_model: "medium"            # faster-whisper model size (tiny, small, medium, large)
+  beam_size: 5                       # Beam size for decoding
+  export_srt: false                  # Also export transcript in SubRip (.srt)
+  report_style: "book"               # PDF layout style (minimal, book)
+
+# Keyframe extraction settings
+keyframes:
+  method: "scene"                    # Keyframe extraction method (scene, iframe, interval)
+  max_fps: 1.0                       # Max FPS for keyframe detection
+  max_frames: 0                      # Cap total saved frames (0 to disable)
+  scene_threshold: 0.45              # Scene change threshold [0-1]
+  interval_sec: 5.0                  # Interval seconds for interval method
+
+# Download settings (for URL processing)
+download:
+  cookies_from_browser: null         # Browser to read cookies from (chrome, edge, brave, firefox)
+  browser_profile: null              # Specific browser profile name
+  cookies_file: null                 # Path to cookies.txt file
+  use_android_client: false          # Use YouTube Android client fallback
+
+# Output settings
+output:
+  base_dir: "./batch_output"         # Base output directory
+  create_subdirs: true               # Create subdirectories for each video
+  preserve_structure: false          # Preserve input directory structure
+  cleanup_temp: true                 # Clean up temporary files after processing
