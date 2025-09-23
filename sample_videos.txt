@@ -1,0 +1,16 @@
+# Sample Video List for Batch Processing
+# Add one video URL or file path per line
+# Lines starting with # are comments and will be ignored
+
+# YouTube URLs
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+https://www.youtube.com/watch?v=example1
+
+# Local video files (uncomment and modify paths as needed)
+# C:\Users\username\Videos\lecture1.mp4
+# C:\Users\username\Videos\tutorial2.mkv
+# ./videos/presentation.avi
+
+# More URLs
+# https://vimeo.com/123456789
+# https://www.twitch.tv/videos/1234567890

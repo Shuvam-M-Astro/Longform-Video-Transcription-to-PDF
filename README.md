@@ -157,7 +157,101 @@ outputs/
     report.pdf
 ```
 
+## Batch Processing
+
+The tool now supports batch processing of multiple videos with advanced features like parallel processing, progress tracking, and error handling.
+
+### Basic Batch Processing
+
+Process multiple videos from a text file:
+```cmd
+python batch_process.py --input-file videos.txt --output-dir ./batch_output
+```
+
+Process all videos in a directory:
+```cmd
+python batch_process.py --input-dir ./videos --output-dir ./batch_output --parallel 2
+```
+
+Process specific URLs:
+```cmd
+python batch_process.py --urls "url1,url2,url3" --output-dir ./batch_output
+```
+
+### Advanced Batch Processing
+
+Use YAML configuration for complex batch processing:
+```cmd
+python batch_process_advanced.py --config batch_config.yaml
+```
+
+### Batch Processing Features
+
+- **Parallel Processing**: Process multiple videos simultaneously
+- **Progress Tracking**: Real-time progress updates and ETA
+- **Error Handling**: Retry failed videos with configurable attempts
+- **Resume Capability**: Resume interrupted batch processing
+- **Priority Support**: Process high-priority videos first
+- **State Management**: Save and restore processing state
+- **Detailed Logging**: Comprehensive logs and result reports
+- **Flexible Input**: Support for files, directories, and URLs
+
+### Creating Video Lists
+
+Create a video list from a directory:
+```cmd
+python batch_utils.py create-list ./videos ./video_list.txt --recursive
+```
+
+Create a video list from URLs:
+```cmd
+python batch_utils.py create-urls "url1" "url2" "url3" ./url_list.txt
+```
+
+### Analyzing Results
+
+View batch processing summary:
+```cmd
+python batch_utils.py analyze ./batch_output/batch_results.json
+```
+
+Export results to CSV:
+```cmd
+python batch_utils.py analyze ./batch_output/batch_results.json --csv results.csv
+```
+
+### Batch Configuration
+
+Create a configuration template:
+```cmd
+python batch_utils.py template batch_config.yaml
+```
+
+Example batch configuration:
+```yaml
+batch:
+  max_parallel: 2
+  retry_failed: true
+  max_retries: 2
+  skip_existing: true
+  stop_on_error: false
+  timeout_per_video: 3600
+
+processing:
+  transcribe_only: false
+  language: "auto"
+  whisper_model: "medium"
+  beam_size: 5
+  report_style: "book"
+
+keyframes:
+  method: "scene"
+  max_fps: 1.0
+  max_frames: 0
+```
+
 ## Troubleshooting
 - Stuck on keyframes: switch to `--kf-method iframe` or `--kf-method interval --kf-interval-sec 10`.
 - Slow transcription on CPU: use `--whisper-model small` and `--beam-size 1` (or enable GPU).
 - CUDA errors: script auto-falls back to CPU; install correct PyTorch CUDA build for GPU.
+- Batch processing issues: check logs in `batch_log.txt` and use `--parallel 1` for debugging.
