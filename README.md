@@ -49,6 +49,23 @@ python -c "from faster_whisper import WhisperModel as W; W('tiny', device='cuda'
 python main.py --url "<VIDEO_URL>" --out ".\outputs\run1" --language auto
 ```
 
+## Interactive UI (Streamlit)
+
+If you prefer to review/edit the transcript, pick keyframes/visuals, and export the PDF without using the CLI, launch the UI:
+
+```cmd
+conda activate video-doc
+streamlit run app.py
+```
+
+Features:
+- Transcript editor: edit segments, merge/split rows, save changes
+- Keyframe controls: choose extraction method and limits; optional contact sheet
+- Visual classification: OCR-based grouping into code, plots, images
+- Live PDF build: one-click export with minimal/book layouts
+
+Outputs are written to `outputs/run_ui` by default. You can change the output directory in the sidebar.
+
 Notes:
 - If you prefer CUDA 12.1, install the matching PyTorch wheels (cu121) from PyTorch.
 - Close your browser when using cookie-based extraction.
