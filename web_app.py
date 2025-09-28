@@ -24,10 +24,6 @@ from flask import Flask, render_template, request, jsonify, send_file, redirect,
 from flask_socketio import SocketIO, emit
 import yaml
 
-# Import the main processing function
-from main import main as process_single_video
-from main import parse_args as parse_single_args
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'video-doc-secret-key-2024'
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -78,33 +74,351 @@ class ProcessingJob:
             # Prepare arguments for main processing
             args = self._prepare_arguments()
             
-            # Create a custom progress callback
-            def progress_callback(progress: float):
-                self.progress = progress
-                self._emit_progress_update()
-                
-            # Override the progress callback in the main function
-            # We'll need to modify the main function to accept this callback
-            
-            # Process the video
+            # Process the video using the actual main function
             self._emit_step_update("Starting video processing...")
             
-            # For now, we'll use a simplified approach
-            # In a real implementation, you'd modify main.py to accept progress callbacks
-            self._emit_step_update("Downloading/processing video...")
-            time.sleep(2)  # Simulate processing
+            # Import the main processing modules
+            from main import (
+                ensure_dirs, 
+                download_video, extract_audio_wav, transcribe_audio,
+                extract_keyframes, classify_frames, build_pdf_report,
+                resolve_stream_urls, stream_extract_audio, stream_extract_keyframes,
+                fallback_download_audio_via_ytdlp, fallback_download_small_video
+            )
+            from src.video_doc.progress import PipelineProgress
+            from yt_dlp import YoutubeDL
+            import json
+            import shutil
             
-            self._emit_step_update("Transcribing audio...")
-            time.sleep(3)  # Simulate transcription
+            # Create a custom progress tracker
+            class WebProgressTracker:
+                def __init__(self, job_instance):
+                    self.job = job_instance
+                    self.current_step = ""
+                    self.step_progress = 0.0
+                    self.total_progress = 0.0
+                    self.step_weights = {
+                        'download': 20, 'audio': 10, 'frames': 20, 
+                        'transcribe': 40, 'classify': 5, 'pdf': 5
+                    }
+                    self.completed_weight = 0.0
+                    
+                def start_step(self, step_name: str, weight: float):
+                    self.current_step = step_name
+                    self.step_progress = 0.0
+                    self.job.current_step = step_name
+                    self.job._emit_step_update(step_name)
+                    
+                def update(self, progress: float):
+                    self.step_progress = progress
+                    # Calculate total progress based on step weights
+                    step_weight = self.step_weights.get(self.current_step.lower().split()[0], 10)
+                    current_weight_progress = (progress / 100.0) * step_weight
+                    self.total_progress = min(95.0, self.completed_weight + current_weight_progress)
+                    self.job.progress = self.total_progress
+                    self.job._emit_progress_update()
+                    
+                def end_step(self):
+                    step_weight = self.step_weights.get(self.current_step.lower().split()[0], 10)
+                    self.completed_weight += step_weight
+                    self.total_progress = min(95.0, self.completed_weight)
+                    self.job.progress = self.total_progress
+                    self.job._emit_progress_update()
             
-            self._emit_step_update("Extracting keyframes...")
-            time.sleep(2)  # Simulate keyframe extraction
+            # Create progress tracker
+            progress_tracker = WebProgressTracker(self)
             
-            self._emit_step_update("Classifying content...")
-            time.sleep(1)  # Simulate classification
+            # Execute the main processing logic
+            output_dir = Path(args.out)
             
-            self._emit_step_update("Generating PDF report...")
-            time.sleep(2)  # Simulate PDF generation
+            # Clean output directory before running, unless resume is requested
+            if output_dir.exists() and not getattr(args, "resume", False):
+                self._emit_step_update("Cleaning output directory...")
+                shutil.rmtree(output_dir, ignore_errors=True)
+            
+            ensure_dirs(output_dir)
+            
+            # Extract video title
+            def _extract_video_title():
+                if getattr(args, "video", None):
+                    try:
+                        stem = Path(args.video).stem
+                        title = stem.replace("-", " ").replace("_", " ").strip()
+                        return title.title() if title else "Video Report"
+                    except Exception:
+                        return "Video Report"
+                
+                def try_opts(use_cookies: bool, use_android: bool):
+                    ydl_opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+                    if use_cookies and args.cookies_from_browser:
+                        tup = (args.cookies_from_browser,) if not args.browser_profile else (args.cookies_from_browser, args.browser_profile)
+                        ydl_opts["cookiesfrombrowser"] = tup
+                    if use_cookies and args.cookies_file:
+                        ydl_opts["cookiefile"] = str(Path(args.cookies_file))
+                    if use_android:
+                        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+                    with YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(args.url, download=False)
+                        return str(info.get("title") or "")
+                
+                # Try different combinations
+                for use_cookies, use_android in [(True, args.use_android_client), (False, args.use_android_client), (False, True)]:
+                    try:
+                        title = try_opts(use_cookies, use_android)
+                        if title:
+                            return title
+                    except Exception:
+                        pass
+                
+                # Fallback
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(args.url)
+                    if parsed.netloc.lower().endswith("youtube.com"):
+                        vid = parse_qs(parsed.query).get("v", [""])[0]
+                        if vid:
+                            return f"YouTube Video {vid}"
+                    if parsed.path:
+                        slug = Path(parsed.path).name.replace("-", " ").replace("_", " ")
+                        slug = slug.strip() or "Video Report"
+                        return slug.title()
+                except Exception:
+                    pass
+                return "Video Report"
+            
+            video_title = _extract_video_title()
+            
+            # Determine source video path
+            if getattr(args, "video", None):
+                src_video_path = Path(args.video)
+                if not src_video_path.exists():
+                    raise FileNotFoundError(f"Local video not found: {src_video_path}")
+                video_path = src_video_path
+            else:
+                video_path = output_dir / "video.mp4"
+            
+            audio_path = output_dir / "audio.wav"
+            transcript_dir = output_dir / "transcript"
+            frames_dir = output_dir / "frames" / "keyframes"
+            classified_dir = output_dir / "classified"
+            snippets_dir = output_dir / "snippets" / "code"
+            
+            keyframe_paths = []
+            
+            # Process based on mode
+            if args.streaming:
+                self._emit_step_update("Resolving stream URLs...")
+                resolved = resolve_stream_urls(
+                    args.url,
+                    cookies_from_browser=args.cookies_from_browser,
+                    browser_profile=args.browser_profile,
+                    cookies_file=Path(args.cookies_file) if args.cookies_file else None,
+                    use_android_client=args.use_android_client,
+                )
+                
+                # Audio extraction
+                try:
+                    if not resolved.get("audio_url"):
+                        raise RuntimeError("No audio_url")
+                    self._emit_step_update("Extracting audio from stream...")
+                    progress_tracker.start_step("Audio (stream)", 10)
+                    stream_extract_audio(resolved["audio_url"], audio_path, headers=resolved.get("headers"), progress_cb=lambda p: progress_tracker.update(p))
+                    progress_tracker.end_step()
+                except Exception:
+                    self._emit_step_update("Stream audio failed; falling back to yt-dlp audio-only...")
+                    progress_tracker.start_step("Audio fallback download", 10)
+                    audio_path = fallback_download_audio_via_ytdlp(
+                        args.url, audio_path,
+                        cookies_from_browser=args.cookies_from_browser,
+                        browser_profile=args.browser_profile,
+                        cookies_file=Path(args.cookies_file) if args.cookies_file else None,
+                        use_android_client=args.use_android_client,
+                    )
+                    progress_tracker.end_step()
+                
+                # Keyframes (skip if transcribe-only)
+                if not args.transcribe_only:
+                    try:
+                        if not resolved.get("video_url"):
+                            raise RuntimeError("No video_url")
+                        self._emit_step_update("Extracting keyframes from stream...")
+                        progress_tracker.start_step("Keyframes (stream)", 20)
+                        keyframe_paths = stream_extract_keyframes(
+                            resolved["video_url"], frames_dir,
+                            max_fps=args.max_fps, scene_threshold=args.min_scene_diff,
+                            headers=resolved.get("headers"),
+                            output_format=args.frame_format, jpeg_quality=args.frame_quality,
+                            max_width=args.frame_max_width,
+                            max_frames=(args.frame_max_frames if args.frame_max_frames > 0 else None),
+                            progress_cb=lambda p: progress_tracker.update(p),
+                        )
+                        progress_tracker.end_step()
+                    except Exception:
+                        self._emit_step_update("Stream keyframes failed; downloading tiny MP4 for keyframes...")
+                        small_video = output_dir / "video_small.mp4"
+                        progress_tracker.start_step("Download tiny video", 10)
+                        fallback_download_small_video(
+                            args.url, small_video,
+                            cookies_from_browser=args.cookies_from_browser,
+                            browser_profile=args.browser_profile,
+                            cookies_file=Path(args.cookies_file) if args.cookies_file else None,
+                            use_android_client=args.use_android_client,
+                        )
+                        progress_tracker.end_step()
+                        self._emit_step_update("Extracting keyframes from tiny MP4...")
+                        progress_tracker.start_step("Keyframes (tiny)", 20)
+                        keyframe_paths = extract_keyframes(
+                            video_path=small_video, output_dir=frames_dir,
+                            max_fps=args.max_fps, scene_threshold=args.min_scene_diff,
+                            method=args.kf_method, interval_sec=args.kf_interval_sec,
+                            progress_cb=lambda p: progress_tracker.update(p),
+                        )
+                        progress_tracker.end_step()
+            else:
+                # Non-streaming mode
+                if getattr(args, "video", None):
+                    self._emit_step_update(f"Using local video file: {video_path}")
+                else:
+                    if not args.skip_download and video_path.exists() and getattr(args, "resume", False):
+                        self._emit_step_update(f"Reusing existing video: {video_path}")
+                    elif not args.skip_download or not video_path.exists():
+                        self._emit_step_update("Downloading full video (mp4)...")
+                        progress_tracker.start_step("Download video", 20)
+                        download_video(
+                            args.url, video_path,
+                            cookies_from_browser=args.cookies_from_browser,
+                            browser_profile=args.browser_profile,
+                            cookies_file=Path(args.cookies_file) if args.cookies_file else None,
+                            use_android_client=args.use_android_client,
+                            progress_cb=lambda p: progress_tracker.update(p),
+                        )
+                        progress_tracker.end_step()
+                
+                # Audio extraction
+                if audio_path.exists() and getattr(args, "resume", False):
+                    self._emit_step_update(f"Reusing existing audio: {audio_path}")
+                else:
+                    self._emit_step_update("Extracting audio from file...")
+                    progress_tracker.start_step("Extract audio", 10)
+                    extract_audio_wav(
+                        video_path, audio_path,
+                        progress_cb=lambda p: progress_tracker.update(p),
+                        start_time=args.trim_start, end_trim=args.trim_end,
+                        volume_gain_db=args.volume_gain,
+                    )
+                    progress_tracker.end_step()
+                
+                # Keyframes
+                if not args.transcribe_only:
+                    self._emit_step_update("Extracting keyframes from file...")
+                    existing_frames = sorted(frames_dir.glob("frame_*.jpg"))
+                    if existing_frames and getattr(args, "resume", False):
+                        keyframe_paths = existing_frames
+                        self._emit_step_update(f"Reusing existing keyframes: {len(keyframe_paths)}")
+                    else:
+                        progress_tracker.start_step("Keyframes", 20)
+                        keyframe_paths = extract_keyframes(
+                            video_path=video_path, output_dir=frames_dir,
+                            max_fps=args.max_fps, scene_threshold=args.min_scene_diff,
+                            method=args.kf_method, interval_sec=args.kf_interval_sec,
+                            output_format=args.frame_format, jpeg_quality=args.frame_quality,
+                            max_width=args.frame_max_width,
+                            max_frames=(args.frame_max_frames if args.frame_max_frames > 0 else None),
+                            skip_dark=args.skip_dark, dark_pixel_value=args.dark_value,
+                            dark_ratio_threshold=args.dark_ratio, dedupe=args.dedupe,
+                            dedupe_similarity=args.dedupe_sim,
+                            progress_cb=lambda p: progress_tracker.update(p),
+                        )
+                        progress_tracker.end_step()
+            
+            # Transcription
+            transcript_txt = transcript_dir / "transcript.txt"
+            segments_json = transcript_dir / "segments.json"
+            srt_path = transcript_dir / "transcript.srt" if args.export_srt else None
+            
+            if getattr(args, "resume", False) and transcript_txt.exists() and segments_json.exists() and (not args.export_srt or (srt_path and srt_path.exists())):
+                self._emit_step_update("Reusing existing transcript artifacts")
+                try:
+                    with open(segments_json, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    segments = [
+                        type("TS", (), {"start": float(s.get("start", 0.0)), "end": float(s.get("end", 0.0)), "text": str(s.get("text", ""))})
+                        for s in data if isinstance(s, dict)
+                    ]
+                except Exception:
+                    segments = []
+            else:
+                self._emit_step_update(f"Transcribing audio with model={args.whisper_model}, beam_size={args.beam_size}...")
+                progress_tracker.start_step("Transcribe", 40)
+                segments = transcribe_audio(
+                    audio_path=audio_path, transcript_txt_path=transcript_txt,
+                    segments_json_path=segments_json, language=args.language,
+                    beam_size=args.beam_size, model_size=args.whisper_model,
+                    progress_cb=lambda p: progress_tracker.update(p),
+                    cpu_threads=(args.whisper_cpu_threads if args.whisper_cpu_threads and args.whisper_cpu_threads > 0 else None),
+                    num_workers=(args.whisper_num_workers if args.whisper_num_workers and args.whisper_num_workers > 0 else None),
+                    srt_path=srt_path,
+                )
+                progress_tracker.end_step()
+            
+            # Classification
+            if args.transcribe_only:
+                classification_result = {"code": [], "plots": [], "images": []}
+            else:
+                self._emit_step_update("Classifying frames...")
+                manifest_path = classified_dir / "classification_result.json"
+                if getattr(args, "resume", False) and manifest_path.exists():
+                    try:
+                        with open(manifest_path, "r", encoding="utf-8") as f:
+                            classification_result = json.load(f)
+                        for k in ("code", "plots", "images"):
+                            classification_result[k] = [Path(p) for p in classification_result.get(k, [])]
+                        self._emit_step_update("Reusing existing classification manifest")
+                    except Exception:
+                        classification_result = {"code": [], "plots": [], "images": []}
+                else:
+                    progress_tracker.start_step("Classify frames", 5)
+                    classification_result = classify_frames(
+                        frame_paths=keyframe_paths, classified_root=classified_dir,
+                        snippets_dir=snippets_dir, progress_cb=lambda p: progress_tracker.update(p),
+                        ocr_languages=[lang.strip() for lang in str(args.ocr_langs).split(',') if lang.strip()],
+                        skip_blurry=args.skip_blurry, blurry_threshold=args.blurry_threshold,
+                        max_per_category=(args.max_per_category if args.max_per_category > 0 else None),
+                    )
+                    progress_tracker.end_step()
+                    # Write manifest
+                    try:
+                        with open(manifest_path, "w", encoding="utf-8") as f:
+                            json.dump({k: [str(p) for p in v] for k, v in classification_result.items()}, f, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+            
+            # PDF Generation
+            self._emit_step_update("Building PDF report...")
+            progress_tracker.start_step("Build PDF", 5)
+            report_pdf_path = output_dir / "report.pdf"
+            
+            # Detect contact sheet path
+            contact_sheet_path = None
+            try:
+                possible_cs = (frames_dir.parent / "contact_sheet.jpg")
+                contact_sheet_path = possible_cs if possible_cs.exists() else None
+            except Exception:
+                contact_sheet_path = None
+            
+            if getattr(args, "resume", False) and report_pdf_path.exists():
+                self._emit_step_update(f"Reusing existing report: {report_pdf_path}")
+                progress_tracker.update(100.0)
+                progress_tracker.end_step()
+            else:
+                build_pdf_report(
+                    output_pdf_path=report_pdf_path, transcript_txt_path=transcript_txt,
+                    segments_json_path=segments_json, classification_result=classification_result,
+                    output_dir=output_dir, progress_cb=lambda p: progress_tracker.update(p),
+                    report_style=args.report_style, video_title=video_title,
+                    contact_sheet_path=contact_sheet_path,
+                )
+                progress_tracker.end_step()
             
             # Mark as completed
             self.status = 'completed'
@@ -117,6 +431,7 @@ class ProcessingJob:
             self.error_message = str(e)
             self.end_time = time.time()
             self._emit_status_update()
+            print(f"Processing error: {e}")  # Log error for debugging
             
     def _prepare_arguments(self):
         """Prepare arguments for the main processing function."""
@@ -142,7 +457,33 @@ class ProcessingJob:
                 max_fps=self.options.get('max_fps', 1.0),
                 min_scene_diff=self.options.get('min_scene_diff', 0.45),
                 report_style=self.options.get('report_style', 'book'),
-                resume=False
+                resume=False,
+                # Additional args with defaults
+                whisper_cpu_threads=0,
+                whisper_num_workers=1,
+                kf_interval_sec=5.0,
+                frame_format='jpg',
+                frame_quality=90,
+                frame_max_width=1280,
+                frame_max_frames=0,
+                skip_dark=False,
+                dark_value=16,
+                dark_ratio=0.98,
+                dedupe=False,
+                dedupe_sim=0.995,
+                skip_download=False,
+                export_srt=False,
+                cookies_from_browser=None,
+                browser_profile=None,
+                cookies_file=None,
+                use_android_client=False,
+                trim_start=0.0,
+                trim_end=0.0,
+                volume_gain=0.0,
+                ocr_langs='en',
+                skip_blurry=False,
+                blurry_threshold=60.0,
+                max_per_category=0
             )
         else:  # file upload
             return MockArgs(
@@ -158,7 +499,33 @@ class ProcessingJob:
                 max_fps=self.options.get('max_fps', 1.0),
                 min_scene_diff=self.options.get('min_scene_diff', 0.45),
                 report_style=self.options.get('report_style', 'book'),
-                resume=False
+                resume=False,
+                # Additional args with defaults
+                whisper_cpu_threads=0,
+                whisper_num_workers=1,
+                kf_interval_sec=5.0,
+                frame_format='jpg',
+                frame_quality=90,
+                frame_max_width=1280,
+                frame_max_frames=0,
+                skip_dark=False,
+                dark_value=16,
+                dark_ratio=0.98,
+                dedupe=False,
+                dedupe_sim=0.995,
+                skip_download=False,
+                export_srt=False,
+                cookies_from_browser=None,
+                browser_profile=None,
+                cookies_file=None,
+                use_android_client=False,
+                trim_start=0.0,
+                trim_end=0.0,
+                volume_gain=0.0,
+                ocr_langs='en',
+                skip_blurry=False,
+                blurry_threshold=60.0,
+                max_per_category=0
             )
     
     def _emit_status_update(self):
