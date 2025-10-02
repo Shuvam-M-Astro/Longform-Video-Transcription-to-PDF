@@ -30,6 +30,11 @@ class VideoProcessor {
             this.showNotification('Disconnected from server', 'warning');
         });
 
+        this.socket.on('error', (data) => {
+            console.error('WebSocket error:', data);
+            this.showNotification(`Connection error: ${data.message}`, 'error');
+        });
+
         this.socket.on('job_status', (data) => {
             this.handleJobStatusUpdate(data);
         });
@@ -159,7 +164,16 @@ class VideoProcessor {
                 this.showNotification('File uploaded successfully. Processing started.', 'success');
                 this.addToProcessingLog('File uploaded and processing started');
             } else {
-                throw new Error(result.error || 'Upload failed');
+                // Handle different error types
+                if (response.status === 413) {
+                    throw new Error('File too large. Please choose a smaller file.');
+                } else if (response.status === 400) {
+                    throw new Error(result.error || 'Invalid file or options');
+                } else if (response.status === 500) {
+                    throw new Error('Server error. Please try again later.');
+                } else {
+                    throw new Error(result.error || 'Upload failed');
+                }
             }
         } catch (error) {
             console.error('Upload error:', error);
@@ -216,7 +230,14 @@ class VideoProcessor {
                 this.showNotification('URL processing started successfully.', 'success');
                 this.addToProcessingLog('URL processing started');
             } else {
-                throw new Error(result.error || 'Processing failed');
+                // Handle different error types
+                if (response.status === 400) {
+                    throw new Error(result.error || 'Invalid URL or options');
+                } else if (response.status === 500) {
+                    throw new Error('Server error. Please try again later.');
+                } else {
+                    throw new Error(result.error || 'Processing failed');
+                }
             }
         } catch (error) {
             console.error('URL processing error:', error);

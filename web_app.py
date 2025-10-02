@@ -13,32 +13,146 @@ Usage:
 
 import os
 import json
+import logging
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 import uuid
+import re
+from urllib.parse import urlparse
 
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from flask_socketio import SocketIO, emit
 import yaml
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('web_app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Configuration
+class Config:
+    """Application configuration with environment variable support."""
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'video-doc-secret-key-2024')
+    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', 'uploads')
+    OUTPUT_FOLDER = os.environ.get('OUTPUT_FOLDER', 'web_outputs')
+    MAX_CONTENT_LENGTH = int(os.environ.get('MAX_FILE_SIZE', 2 * 1024 * 1024 * 1024))  # 2GB default
+    DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
+    HOST = os.environ.get('HOST', '0.0.0.0')
+    PORT = int(os.environ.get('PORT', 5000))
+    
+    # File validation
+    ALLOWED_EXTENSIONS = {
+        'video': {'mp4', 'mkv', 'mov', 'webm', 'avi', 'wmv'},
+        'audio': {'mp3', 'm4a', 'wav', 'flac', 'aac', 'ogg'}
+    }
+    
+    # Processing limits
+    MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', 3))
+    JOB_TIMEOUT = int(os.environ.get('JOB_TIMEOUT', 3600))  # 1 hour
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'video-doc-secret-key-2024'
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['OUTPUT_FOLDER'] = 'web_outputs'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB max file size
+app.config.from_object(Config)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Global storage for processing jobs
-processing_jobs: Dict[str, Dict[str, Any]] = {}
+processing_jobs: Dict[str, 'ProcessingJob'] = {}
 job_lock = threading.Lock()
 
 # Ensure directories exist
 Path(app.config['UPLOAD_FOLDER']).mkdir(exist_ok=True)
 Path(app.config['OUTPUT_FOLDER']).mkdir(exist_ok=True)
+
+# Validation utilities
+class ValidationError(Exception):
+    """Custom exception for validation errors."""
+    pass
+
+def validate_file_upload(file) -> None:
+    """Validate uploaded file."""
+    if not file or file.filename == '':
+        raise ValidationError("No file provided")
+    
+    # Check file extension
+    filename = file.filename.lower()
+    file_ext = filename.split('.')[-1] if '.' in filename else ''
+    
+    allowed_exts = Config.ALLOWED_EXTENSIONS['video'] | Config.ALLOWED_EXTENSIONS['audio']
+    if file_ext not in allowed_exts:
+        raise ValidationError(f"Unsupported file type. Allowed: {', '.join(allowed_exts)}")
+    
+    # Check file size
+    file.seek(0, 2)  # Seek to end
+    file_size = file.tell()
+    file.seek(0)  # Reset to beginning
+    
+    if file_size > app.config['MAX_CONTENT_LENGTH']:
+        max_size_gb = app.config['MAX_CONTENT_LENGTH'] / (1024**3)
+        raise ValidationError(f"File size exceeds {max_size_gb:.1f}GB limit")
+
+def validate_url(url: str) -> None:
+    """Validate video URL."""
+    if not url or not url.strip():
+        raise ValidationError("No URL provided")
+    
+    try:
+        parsed = urlparse(url.strip())
+        if not parsed.scheme or not parsed.netloc:
+            raise ValidationError("Invalid URL format")
+        
+        # Basic check for common video platforms
+        domain = parsed.netloc.lower()
+        if not any(platform in domain for platform in ['youtube.com', 'youtu.be', 'vimeo.com', 'twitch.tv']):
+            logger.warning(f"Unrecognized video platform: {domain}")
+            
+    except Exception as e:
+        raise ValidationError(f"Invalid URL: {str(e)}")
+
+def validate_processing_options(options: Dict[str, Any]) -> None:
+    """Validate processing options."""
+    # Language validation
+    valid_languages = {'auto', 'en', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh'}
+    if options.get('language') not in valid_languages:
+        raise ValidationError(f"Invalid language. Must be one of: {', '.join(valid_languages)}")
+    
+    # Whisper model validation
+    valid_models = {'tiny', 'base', 'small', 'medium', 'large'}
+    if options.get('whisper_model') not in valid_models:
+        raise ValidationError(f"Invalid whisper model. Must be one of: {', '.join(valid_models)}")
+    
+    # Beam size validation
+    beam_size = options.get('beam_size', 5)
+    if not isinstance(beam_size, int) or beam_size < 1 or beam_size > 10:
+        raise ValidationError("Beam size must be an integer between 1 and 10")
+    
+    # Keyframe method validation
+    valid_methods = {'scene', 'iframe', 'interval'}
+    if options.get('kf_method') not in valid_methods:
+        raise ValidationError(f"Invalid keyframe method. Must be one of: {', '.join(valid_methods)}")
+    
+    # Report style validation
+    valid_styles = {'minimal', 'book'}
+    if options.get('report_style') not in valid_styles:
+        raise ValidationError(f"Invalid report style. Must be one of: {', '.join(valid_styles)}")
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename for safe storage."""
+    # Remove or replace dangerous characters
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    # Limit length
+    if len(filename) > 200:
+        name, ext = os.path.splitext(filename)
+        filename = name[:200-len(ext)] + ext
+    return filename
 
 
 class ProcessingJob:
@@ -57,12 +171,61 @@ class ProcessingJob:
         self.end_time = None
         self.output_files = {}
         self.thread = None
+        self.created_at = datetime.now()
+        self.last_activity = datetime.now()
         
-    def start_processing(self):
+        # Validate options
+        try:
+            validate_processing_options(options)
+        except ValidationError as e:
+            logger.error(f"Invalid options for job {job_id}: {e}")
+            raise
+        
+    def start_processing(self) -> None:
         """Start processing in a separate thread."""
-        self.thread = threading.Thread(target=self._process_video)
+        if self.status != 'pending':
+            raise ValueError(f"Cannot start job {self.job_id} with status {self.status}")
+        
+        # Check concurrent job limit
+        with job_lock:
+            active_jobs = sum(1 for job in processing_jobs.values() if job.status == 'processing')
+            if active_jobs >= Config.MAX_CONCURRENT_JOBS:
+                raise ValueError(f"Maximum concurrent jobs ({Config.MAX_CONCURRENT_JOBS}) reached")
+        
+        self.thread = threading.Thread(target=self._process_video, name=f"Job-{self.job_id}")
         self.thread.daemon = True
         self.thread.start()
+        logger.info(f"Started processing job {self.job_id}")
+    
+    def cancel(self) -> bool:
+        """Cancel the processing job if possible."""
+        if self.status in ['completed', 'failed']:
+            return False
+        
+        self.status = 'cancelled'
+        self.end_time = time.time()
+        self._emit_status_update()
+        logger.info(f"Cancelled job {self.job_id}")
+        return True
+    
+    def cleanup(self) -> None:
+        """Clean up job resources."""
+        try:
+            # Clean up output directory if job failed or was cancelled
+            if self.status in ['failed', 'cancelled']:
+                output_dir = Path(app.config['OUTPUT_FOLDER']) / self.job_id
+                if output_dir.exists():
+                    import shutil
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                    logger.info(f"Cleaned up output directory for job {self.job_id}")
+        except Exception as e:
+            logger.error(f"Error cleaning up job {self.job_id}: {e}")
+    
+    def is_stale(self) -> bool:
+        """Check if job is stale (no activity for too long)."""
+        if self.status == 'processing':
+            return (datetime.now() - self.last_activity).seconds > Config.JOB_TIMEOUT
+        return False
         
     def _process_video(self):
         """Process the video with progress callbacks."""
@@ -102,28 +265,54 @@ class ProcessingJob:
                         'transcribe': 40, 'classify': 5, 'pdf': 5
                     }
                     self.completed_weight = 0.0
+                    self.step_start_time = None
                     
                 def start_step(self, step_name: str, weight: float):
-                    self.current_step = step_name
-                    self.step_progress = 0.0
-                    self.job.current_step = step_name
-                    self.job._emit_step_update(step_name)
+                    try:
+                        self.current_step = step_name
+                        self.step_progress = 0.0
+                        self.step_start_time = time.time()
+                        self.job.current_step = step_name
+                        self.job.last_activity = datetime.now()
+                        self.job._emit_step_update(step_name)
+                        logger.info(f"Job {self.job.job_id}: Started step '{step_name}'")
+                    except Exception as e:
+                        logger.error(f"Error in start_step: {e}")
                     
                 def update(self, progress: float):
-                    self.step_progress = progress
-                    # Calculate total progress based on step weights
-                    step_weight = self.step_weights.get(self.current_step.lower().split()[0], 10)
-                    current_weight_progress = (progress / 100.0) * step_weight
-                    self.total_progress = min(95.0, self.completed_weight + current_weight_progress)
-                    self.job.progress = self.total_progress
-                    self.job._emit_progress_update()
+                    try:
+                        # Validate progress value
+                        progress = max(0.0, min(100.0, float(progress)))
+                        
+                        self.step_progress = progress
+                        # Calculate total progress based on step weights
+                        step_key = self.current_step.lower().split()[0]
+                        step_weight = self.step_weights.get(step_key, 10)
+                        current_weight_progress = (progress / 100.0) * step_weight
+                        self.total_progress = min(95.0, self.completed_weight + current_weight_progress)
+                        
+                        self.job.progress = self.total_progress
+                        self.job.last_activity = datetime.now()
+                        self.job._emit_progress_update()
+                    except Exception as e:
+                        logger.error(f"Error in progress update: {e}")
                     
                 def end_step(self):
-                    step_weight = self.step_weights.get(self.current_step.lower().split()[0], 10)
-                    self.completed_weight += step_weight
-                    self.total_progress = min(95.0, self.completed_weight)
-                    self.job.progress = self.total_progress
-                    self.job._emit_progress_update()
+                    try:
+                        step_key = self.current_step.lower().split()[0]
+                        step_weight = self.step_weights.get(step_key, 10)
+                        self.completed_weight += step_weight
+                        self.total_progress = min(95.0, self.completed_weight)
+                        
+                        self.job.progress = self.total_progress
+                        self.job.last_activity = datetime.now()
+                        self.job._emit_progress_update()
+                        
+                        if self.step_start_time:
+                            duration = time.time() - self.step_start_time
+                            logger.info(f"Job {self.job.job_id}: Completed step '{self.current_step}' in {duration:.1f}s")
+                    except Exception as e:
+                        logger.error(f"Error in end_step: {e}")
             
             # Create progress tracker
             progress_tracker = WebProgressTracker(self)
@@ -430,8 +619,15 @@ class ProcessingJob:
             self.status = 'failed'
             self.error_message = str(e)
             self.end_time = time.time()
+            self.last_activity = datetime.now()
             self._emit_status_update()
-            print(f"Processing error: {e}")  # Log error for debugging
+            logger.error(f"Processing error for job {self.job_id}: {e}", exc_info=True)
+            
+            # Clean up on failure
+            try:
+                self.cleanup()
+            except Exception as cleanup_error:
+                logger.error(f"Error during cleanup for job {self.job_id}: {cleanup_error}")
             
     def _prepare_arguments(self):
         """Prepare arguments for the main processing function."""
@@ -565,88 +761,141 @@ def index():
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """Handle file upload."""
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-    
-    # Generate unique job ID
-    job_id = str(uuid.uuid4())
-    
-    # Save uploaded file
-    filename = f"{job_id}_{file.filename}"
-    file_path = Path(app.config['UPLOAD_FOLDER']) / filename
-    file.save(file_path)
-    
-    # Get processing options from form
-    options = {
-        'language': request.form.get('language', 'auto'),
-        'whisper_model': request.form.get('whisper_model', 'medium'),
-        'beam_size': int(request.form.get('beam_size', 5)),
-        'transcribe_only': request.form.get('transcribe_only') == 'on',
-        'streaming': False,  # Not applicable for file uploads
-        'kf_method': request.form.get('kf_method', 'scene'),
-        'max_fps': float(request.form.get('max_fps', 1.0)),
-        'min_scene_diff': float(request.form.get('min_scene_diff', 0.45)),
-        'report_style': request.form.get('report_style', 'book')
-    }
-    
-    # Create processing job
-    job = ProcessingJob(job_id, 'file', str(file_path), options)
-    
-    with job_lock:
-        processing_jobs[job_id] = job
-    
-    # Start processing
-    job.start_processing()
-    
-    return jsonify({
-        'job_id': job_id,
-        'status': 'started',
-        'message': 'File uploaded and processing started'
-    })
+    try:
+        # Validate file upload
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        validate_file_upload(file)
+        
+        # Generate unique job ID
+        job_id = str(uuid.uuid4())
+        
+        # Sanitize filename and save uploaded file
+        original_filename = sanitize_filename(file.filename)
+        filename = f"{job_id}_{original_filename}"
+        file_path = Path(app.config['UPLOAD_FOLDER']) / filename
+        
+        try:
+            file.save(file_path)
+            logger.info(f"Saved uploaded file: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save file: {e}")
+            return jsonify({'error': 'Failed to save uploaded file'}), 500
+        
+        # Get and validate processing options from form
+        try:
+            options = {
+                'language': request.form.get('language', 'auto'),
+                'whisper_model': request.form.get('whisper_model', 'medium'),
+                'beam_size': int(request.form.get('beam_size', 5)),
+                'transcribe_only': request.form.get('transcribe_only') == 'on',
+                'streaming': False,  # Not applicable for file uploads
+                'kf_method': request.form.get('kf_method', 'scene'),
+                'max_fps': float(request.form.get('max_fps', 1.0)),
+                'min_scene_diff': float(request.form.get('min_scene_diff', 0.45)),
+                'report_style': request.form.get('report_style', 'book')
+            }
+            validate_processing_options(options)
+        except (ValueError, ValidationError) as e:
+            # Clean up uploaded file if validation fails
+            try:
+                file_path.unlink()
+            except:
+                pass
+            return jsonify({'error': str(e)}), 400
+        
+        # Create processing job
+        try:
+            job = ProcessingJob(job_id, 'file', str(file_path), options)
+            
+            with job_lock:
+                processing_jobs[job_id] = job
+            
+            # Start processing
+            job.start_processing()
+            
+            logger.info(f"Started file processing job {job_id} for file {original_filename}")
+            
+            return jsonify({
+                'job_id': job_id,
+                'status': 'started',
+                'message': 'File uploaded and processing started'
+            })
+            
+        except ValueError as e:
+            # Clean up uploaded file if job creation fails
+            try:
+                file_path.unlink()
+            except:
+                pass
+            return jsonify({'error': str(e)}), 400
+            
+    except ValidationError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Unexpected error in upload_file: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/process_url', methods=['POST'])
 def process_url():
     """Handle URL processing."""
-    data = request.get_json()
-    url = data.get('url')
-    if not url:
-        return jsonify({'error': 'No URL provided'}), 400
-    
-    # Generate unique job ID
-    job_id = str(uuid.uuid4())
-    
-    # Get processing options
-    options = {
-        'language': data.get('language', 'auto'),
-        'whisper_model': data.get('whisper_model', 'medium'),
-        'beam_size': int(data.get('beam_size', 5)),
-        'transcribe_only': data.get('transcribe_only', False),
-        'streaming': data.get('streaming', False),
-        'kf_method': data.get('kf_method', 'scene'),
-        'max_fps': float(data.get('max_fps', 1.0)),
-        'min_scene_diff': float(data.get('min_scene_diff', 0.45)),
-        'report_style': data.get('report_style', 'book')
-    }
-    
-    # Create processing job
-    job = ProcessingJob(job_id, 'url', url, options)
-    
-    with job_lock:
-        processing_jobs[job_id] = job
-    
-    # Start processing
-    job.start_processing()
-    
-    return jsonify({
-        'job_id': job_id,
-        'status': 'started',
-        'message': 'URL processing started'
-    })
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        url = data.get('url')
+        validate_url(url)
+        
+        # Generate unique job ID
+        job_id = str(uuid.uuid4())
+        
+        # Get and validate processing options
+        try:
+            options = {
+                'language': data.get('language', 'auto'),
+                'whisper_model': data.get('whisper_model', 'medium'),
+                'beam_size': int(data.get('beam_size', 5)),
+                'transcribe_only': data.get('transcribe_only', False),
+                'streaming': data.get('streaming', False),
+                'kf_method': data.get('kf_method', 'scene'),
+                'max_fps': float(data.get('max_fps', 1.0)),
+                'min_scene_diff': float(data.get('min_scene_diff', 0.45)),
+                'report_style': data.get('report_style', 'book')
+            }
+            validate_processing_options(options)
+        except (ValueError, ValidationError) as e:
+            return jsonify({'error': str(e)}), 400
+        
+        # Create processing job
+        try:
+            job = ProcessingJob(job_id, 'url', url, options)
+            
+            with job_lock:
+                processing_jobs[job_id] = job
+            
+            # Start processing
+            job.start_processing()
+            
+            logger.info(f"Started URL processing job {job_id} for URL {url}")
+            
+            return jsonify({
+                'job_id': job_id,
+                'status': 'started',
+                'message': 'URL processing started'
+            })
+            
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+            
+    except ValidationError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Unexpected error in process_url: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/job/<job_id>')
@@ -700,38 +949,161 @@ def download_file(job_id, file_type):
 @app.route('/jobs')
 def list_jobs():
     """List all processing jobs."""
-    with job_lock:
-        jobs = []
-        for job_id, job in processing_jobs.items():
-            jobs.append({
-                'job_id': job_id,
-                'job_type': job.job_type,
-                'identifier': job.identifier,
-                'status': job.status,
-                'progress': job.progress,
-                'current_step': job.current_step,
-                'start_time': job.start_time,
-                'end_time': job.end_time,
-                'duration': job.end_time - job.start_time if job.end_time and job.start_time else None
-            })
-    
-    return jsonify({'jobs': jobs})
+    try:
+        with job_lock:
+            jobs = []
+            for job_id, job in processing_jobs.items():
+                jobs.append({
+                    'job_id': job_id,
+                    'job_type': job.job_type,
+                    'identifier': job.identifier,
+                    'status': job.status,
+                    'progress': job.progress,
+                    'current_step': job.current_step,
+                    'start_time': job.start_time,
+                    'end_time': job.end_time,
+                    'duration': job.end_time - job.start_time if job.end_time and job.start_time else None,
+                    'created_at': job.created_at.isoformat(),
+                    'last_activity': job.last_activity.isoformat()
+                })
+        
+        return jsonify({'jobs': jobs})
+    except Exception as e:
+        logger.error(f"Error listing jobs: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to list jobs'}), 500
+
+
+@app.route('/job/<job_id>/cancel', methods=['POST'])
+def cancel_job(job_id):
+    """Cancel a processing job."""
+    try:
+        with job_lock:
+            if job_id not in processing_jobs:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            job = processing_jobs[job_id]
+            if job.cancel():
+                logger.info(f"Cancelled job {job_id}")
+                return jsonify({'message': 'Job cancelled successfully'})
+            else:
+                return jsonify({'error': 'Job cannot be cancelled'}), 400
+                
+    except Exception as e:
+        logger.error(f"Error cancelling job {job_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to cancel job'}), 500
+
+
+@app.route('/job/<job_id>/cleanup', methods=['POST'])
+def cleanup_job(job_id):
+    """Clean up job resources."""
+    try:
+        with job_lock:
+            if job_id not in processing_jobs:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            job = processing_jobs[job_id]
+            job.cleanup()
+            
+            # Remove job from memory if it's completed or failed
+            if job.status in ['completed', 'failed', 'cancelled']:
+                del processing_jobs[job_id]
+                logger.info(f"Removed completed job {job_id} from memory")
+            
+            return jsonify({'message': 'Job cleaned up successfully'})
+            
+    except Exception as e:
+        logger.error(f"Error cleaning up job {job_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to cleanup job'}), 500
+
+
+@app.route('/cleanup-stale', methods=['POST'])
+def cleanup_stale_jobs():
+    """Clean up stale jobs."""
+    try:
+        cleaned_count = 0
+        with job_lock:
+            stale_jobs = [job_id for job_id, job in processing_jobs.items() if job.is_stale()]
+            
+            for job_id in stale_jobs:
+                job = processing_jobs[job_id]
+                job.status = 'failed'
+                job.error_message = 'Job timed out'
+                job.cleanup()
+                del processing_jobs[job_id]
+                cleaned_count += 1
+                logger.info(f"Cleaned up stale job {job_id}")
+        
+        return jsonify({'message': f'Cleaned up {cleaned_count} stale jobs'})
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up stale jobs: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to cleanup stale jobs'}), 500
 
 
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection."""
-    print(f"Client connected: {request.sid}")
-    emit('connected', {'message': 'Connected to video processing server'})
+    try:
+        logger.info(f"Client connected: {request.sid}")
+        emit('connected', {'message': 'Connected to video processing server'})
+    except Exception as e:
+        logger.error(f"Error handling client connection: {e}")
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection."""
-    print(f"Client disconnected: {request.sid}")
+    try:
+        logger.info(f"Client disconnected: {request.sid}")
+    except Exception as e:
+        logger.error(f"Error handling client disconnection: {e}")
+
+
+@socketio.on_error_default
+def default_error_handler(e):
+    """Default error handler for WebSocket events."""
+    logger.error(f"WebSocket error: {e}", exc_info=True)
+    emit('error', {'message': 'An error occurred'})
+
+
+# Error handlers for Flask routes
+@app.errorhandler(413)
+def too_large(e):
+    """Handle file too large error."""
+    return jsonify({'error': 'File too large'}), 413
+
+
+@app.errorhandler(400)
+def bad_request(e):
+    """Handle bad request error."""
+    return jsonify({'error': 'Bad request'}), 400
+
+
+@app.errorhandler(404)
+def not_found(e):
+    """Handle not found error."""
+    return jsonify({'error': 'Not found'}), 404
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    """Handle internal server error."""
+    logger.error(f"Internal server error: {e}", exc_info=True)
+    return jsonify({'error': 'Internal server error'}), 500
 
 
 if __name__ == '__main__':
+    logger.info("Starting Video Documentation Builder Web Interface...")
+    logger.info(f"Configuration: DEBUG={Config.DEBUG}, HOST={Config.HOST}, PORT={Config.PORT}")
+    logger.info(f"Max file size: {Config.MAX_CONTENT_LENGTH / (1024**3):.1f}GB")
+    logger.info(f"Max concurrent jobs: {Config.MAX_CONCURRENT_JOBS}")
+    logger.info(f"Job timeout: {Config.JOB_TIMEOUT}s")
+    
     print("Starting Video Documentation Builder Web Interface...")
-    print("Open your browser and go to: http://localhost:5000")
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    print(f"Open your browser and go to: http://{Config.HOST}:{Config.PORT}")
+    
+    try:
+        socketio.run(app, debug=Config.DEBUG, host=Config.HOST, port=Config.PORT)
+    except Exception as e:
+        logger.error(f"Failed to start server: {e}", exc_info=True)
+        raise
