@@ -1,0 +1,424 @@
+# Kubernetes deployment configurations for horizontal scaling
+
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: video-processing
+  labels:
+    name: video-processing
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: video-processing-config
+  namespace: video-processing
+data:
+  DATABASE_URL: "postgresql://video_doc:password@postgres-service:5432/video_doc_db"
+  CELERY_BROKER_URL: "redis://redis-service:6379/0"
+  CELERY_RESULT_BACKEND: "redis://redis-service:6379/0"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  MAX_CONCURRENT_JOBS: "5"
+  JOB_TIMEOUT: "3600"
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: video-processing-secrets
+  namespace: video-processing
+type: Opaque
+data:
+  SECRET_KEY: dmlkZW8tZG9jLXNlY3JldC1rZXktMjAyNA==  # base64 encoded
+  POSTGRES_PASSWORD: cGFzc3dvcmQ=  # base64 encoded
+---
+# PostgreSQL deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: video-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: video_doc_db
+        - name: POSTGRES_USER
+          value: video_doc
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: video-processing-secrets
+              key: POSTGRES_PASSWORD
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - video_doc
+            - -d
+            - video_doc_db
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - video_doc
+            - -d
+            - video_doc_db
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+# PostgreSQL service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: video-processing
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+---
+# PostgreSQL PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: video-processing
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+# Redis deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: video-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+# Redis service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: video-processing
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+---
+# Web application deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-processing-web
+  namespace: video-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: video-processing-web
+  template:
+    metadata:
+      labels:
+        app: video-processing-web
+    spec:
+      containers:
+      - name: web
+        image: video-processing:latest
+        command: ["python", "enhanced_web_app.py"]
+        ports:
+        - containerPort: 5000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: DATABASE_URL
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: CELERY_RESULT_BACKEND
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: LOG_LEVEL
+        - name: LOG_FORMAT
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: LOG_FORMAT
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: video-processing-secrets
+              key: SECRET_KEY
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: uploads
+          mountPath: /app/uploads
+        - name: outputs
+          mountPath: /app/web_outputs
+      volumes:
+      - name: uploads
+        persistentVolumeClaim:
+          claimName: uploads-pvc
+      - name: outputs
+        persistentVolumeClaim:
+          claimName: outputs-pvc
+---
+# Web application service
+apiVersion: v1
+kind: Service
+metadata:
+  name: video-processing-web-service
+  namespace: video-processing
+spec:
+  selector:
+    app: video-processing-web
+  ports:
+  - port: 80
+    targetPort: 5000
+  type: LoadBalancer
+---
+# Uploads PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uploads-pvc
+  namespace: video-processing
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+---
+# Outputs PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: outputs-pvc
+  namespace: video-processing
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+---
+# Celery worker deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-processing-worker
+  namespace: video-processing
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: video-processing-worker
+  template:
+    metadata:
+      labels:
+        app: video-processing-worker
+    spec:
+      containers:
+      - name: worker
+        image: video-processing:latest
+        command: ["celery", "-A", "src.video_doc.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: DATABASE_URL
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: CELERY_RESULT_BACKEND
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: LOG_LEVEL
+        - name: LOG_FORMAT
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: LOG_FORMAT
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        volumeMounts:
+        - name: uploads
+          mountPath: /app/uploads
+        - name: outputs
+          mountPath: /app/web_outputs
+      volumes:
+      - name: uploads
+        persistentVolumeClaim:
+          claimName: uploads-pvc
+      - name: outputs
+        persistentVolumeClaim:
+          claimName: outputs-pvc
+---
+# Flower monitoring deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flower
+  namespace: video-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flower
+  template:
+    metadata:
+      labels:
+        app: flower
+    spec:
+      containers:
+      - name: flower
+        image: video-processing:latest
+        command: ["celery", "-A", "src.video_doc.celery_app", "flower", "--port=5555"]
+        ports:
+        - containerPort: 5555
+        env:
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: video-processing-config
+              key: CELERY_BROKER_URL
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+# Flower service
+apiVersion: v1
+kind: Service
+metadata:
+  name: flower-service
+  namespace: video-processing
+spec:
+  selector:
+    app: flower
+  ports:
+  - port: 5555
+    targetPort: 5555
+  type: LoadBalancer
