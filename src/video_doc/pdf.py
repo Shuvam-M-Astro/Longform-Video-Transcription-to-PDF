@@ -45,6 +45,9 @@ def build_pdf_report(
     report_style: str = "minimal",
     video_title: str = "Video Report",
     contact_sheet_path: Optional[Path] = None,
+    pdf_author: Optional[str] = None,
+    pdf_subject: Optional[str] = None,
+    pdf_keywords: Optional[List[str]] = None,
 ) -> Path:
     output_pdf_path = Path(output_pdf_path)
     output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -405,7 +408,35 @@ def build_pdf_report(
 
     if progress_cb:
         progress_cb(50.0)
-    doc.build(flow)
+    # Set PDF metadata (title/author/subject/keywords) on the canvas
+    def _apply_pdf_metadata(canv: canvas.Canvas, _doc: SimpleDocTemplate):
+        try:
+            canv.setTitle(str(video_title or "Video Report"))
+        except Exception:
+            pass
+        if pdf_author:
+            try:
+                canv.setAuthor(str(pdf_author))
+            except Exception:
+                pass
+        if pdf_subject:
+            try:
+                canv.setSubject(str(pdf_subject))
+            except Exception:
+                pass
+        try:
+            canv.setCreator("Longform Video Transcription to PDF")
+        except Exception:
+            pass
+        if pdf_keywords:
+            try:
+                # Some ReportLab versions support setKeywords; guard just in case
+                if hasattr(canv, "setKeywords"):
+                    canv.setKeywords(", ".join([str(k) for k in pdf_keywords]))
+            except Exception:
+                pass
+
+    doc.build(flow, onFirstPage=_apply_pdf_metadata, onLaterPages=_apply_pdf_metadata)
     if progress_cb:
         progress_cb(100.0)
     return output_pdf_path
