@@ -39,6 +39,9 @@ from src.video_doc.data_validation import (
 # Import enhanced processor
 from enhanced_main import EnhancedVideoProcessor
 
+# Import health check functionality
+from src.video_doc.health_checks import get_health_status, get_health_summary, get_service_health
+
 logger = get_logger(__name__)
 
 # Configuration
@@ -729,6 +732,156 @@ def internal_error(e):
     return jsonify({'error': 'Internal server error'}), 500
 
 
+# Health Check Endpoints
+@app.route('/health')
+def health_check():
+    """Comprehensive health check endpoint."""
+    try:
+        health_data = get_health_status()
+        
+        # Set appropriate HTTP status code
+        status_code = 200
+        if health_data['status'] == 'unhealthy':
+            status_code = 503
+        elif health_data['status'] == 'degraded':
+            status_code = 200  # Still operational but with warnings
+        
+        return jsonify(health_data), status_code
+    except Exception as e:
+        logger.error(f"Health check failed: {e}", exc_info=True)
+        return jsonify({
+            'status': 'unhealthy',
+            'timestamp': datetime.now().isoformat(),
+            'error': 'Health check failed',
+            'error_message': str(e)
+        }), 503
+
+
+@app.route('/health/summary')
+def health_summary():
+    """Simplified health summary endpoint."""
+    try:
+        summary = get_health_summary()
+        
+        # Set appropriate HTTP status code
+        status_code = 200
+        if summary['status'] == 'unhealthy':
+            status_code = 503
+        elif summary['status'] == 'degraded':
+            status_code = 200
+        
+        return jsonify(summary), status_code
+    except Exception as e:
+        logger.error(f"Health summary failed: {e}", exc_info=True)
+        return jsonify({
+            'status': 'unhealthy',
+            'timestamp': datetime.now().isoformat(),
+            'error': 'Health summary failed',
+            'error_message': str(e)
+        }), 503
+
+
+@app.route('/health/service/<service_name>')
+def service_health(service_name):
+    """Get health status for a specific service."""
+    try:
+        service_data = get_service_health(service_name)
+        
+        if service_data is None:
+            return jsonify({'error': 'Service not found'}), 404
+        
+        # Set appropriate HTTP status code
+        status_code = 200
+        if service_data['status'] == 'unhealthy':
+            status_code = 503
+        elif service_data['status'] == 'degraded':
+            status_code = 200
+        
+        return jsonify(service_data), status_code
+    except Exception as e:
+        logger.error(f"Service health check failed for {service_name}: {e}", exc_info=True)
+        return jsonify({
+            'error': 'Service health check failed',
+            'error_message': str(e)
+        }), 500
+
+
+@app.route('/health/live')
+def liveness_probe():
+    """Kubernetes liveness probe endpoint."""
+    try:
+        # Simple check - if the app is running, it's alive
+        return jsonify({
+            'status': 'alive',
+            'timestamp': datetime.now().isoformat(),
+            'uptime_seconds': time.time() - app.config.get('start_time', time.time())
+        }), 200
+    except Exception as e:
+        logger.error(f"Liveness probe failed: {e}", exc_info=True)
+        return jsonify({
+            'status': 'dead',
+            'error': str(e)
+        }), 503
+
+
+@app.route('/health/ready')
+def readiness_probe():
+    """Kubernetes readiness probe endpoint."""
+    try:
+        # Check if the app is ready to serve requests
+        summary = get_health_summary()
+        
+        # App is ready if core services are healthy
+        core_services = ['database', 'file_system']
+        ready = True
+        
+        for service_name in core_services:
+            service_data = get_service_health(service_name)
+            if service_data and service_data['status'] == 'unhealthy':
+                ready = False
+                break
+        
+        if ready:
+            return jsonify({
+                'status': 'ready',
+                'timestamp': datetime.now().isoformat(),
+                'summary': summary
+            }), 200
+        else:
+            return jsonify({
+                'status': 'not_ready',
+                'timestamp': datetime.now().isoformat(),
+                'summary': summary
+            }), 503
+            
+    except Exception as e:
+        logger.error(f"Readiness probe failed: {e}", exc_info=True)
+        return jsonify({
+            'status': 'not_ready',
+            'error': str(e)
+        }), 503
+
+
+@app.route('/metrics')
+def metrics_endpoint():
+    """Prometheus metrics endpoint."""
+    try:
+        from src.video_doc.monitoring import metrics
+        from prometheus_client.exposition import CONTENT_TYPE_LATEST
+        
+        metrics_data = metrics.get_metrics()
+        return metrics_data, 200, {'Content-Type': CONTENT_TYPE_LATEST}
+    except Exception as e:
+        logger.error(f"Metrics endpoint failed: {e}", exc_info=True)
+        return jsonify({'error': 'Metrics unavailable'}), 500
+
+
+@app.route('/health-dashboard')
+def health_dashboard():
+    """Health monitoring dashboard."""
+    return render_template('health_dashboard.html')
+
+
 if __name__ == '__main__':
     logger.info("Starting Enhanced Video Documentation Builder Web Interface...")
     logger.info(f"Configuration: DEBUG={Config.DEBUG}, HOST={Config.HOST}, PORT={Config.PORT}")
@@ -745,7 +898,9 @@ if __name__ == '__main__':
     
     print("Starting Enhanced Video Documentation Builder Web Interface...")
     print(f"Open your browser and go to: http://{Config.HOST}:{Config.PORT}")
-    print(f"Health check: http://{Config.HOST}:{Config.PORT}/health")
+    print(f"Health Dashboard: http://{Config.HOST}:{Config.PORT}/health-dashboard")
+    print(f"Health Check API: http://{Config.HOST}:{Config.PORT}/health")
+    print(f"Health Summary: http://{Config.HOST}:{Config.PORT}/health/summary")
     print(f"Metrics: http://{Config.HOST}:{Config.PORT}/metrics")
     
     try:
