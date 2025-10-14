@@ -413,3 +413,7 @@ class JobManager:
             "processing_jobs": processing_jobs,
             "success_rate": completed_jobs / total_jobs if total_jobs > 0 else 0
         }
+
+
+# Import authentication models
+from .auth import User, UserSession, APIKey
