@@ -42,6 +42,10 @@ from enhanced_main import EnhancedVideoProcessor
 # Import health check functionality
 from src.video_doc.health_checks import get_health_status, get_health_summary, get_service_health
 
+# Import authentication functionality
+from src.video_doc.flask_auth import init_auth_system, require_auth, optional_auth, get_current_user_session
+from src.video_doc.auth import Permission
+
 logger = get_logger(__name__)
 
 # Configuration
@@ -70,6 +74,9 @@ class Config:
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Initialize authentication system
+init_auth_system(app)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -455,9 +462,13 @@ def metrics_endpoint():
 
 # Existing routes with enhanced error handling
 @app.route('/')
+@optional_auth
 def index():
     """Main page with upload form."""
-    return render_template('index.html')
+    user_session = get_current_user_session()
+    if not user_session:
+        return render_template('login.html')
+    return render_template('index.html', user=user_session)
 
 
 @app.route('/upload', methods=['POST'])
@@ -882,6 +893,13 @@ def health_dashboard():
     return render_template('health_dashboard.html')
 
 
+@app.route('/user-management')
+@require_auth()
+def user_management():
+    """User management dashboard."""
+    return render_template('user_management.html')
+
+
 if __name__ == '__main__':
     logger.info("Starting Enhanced Video Documentation Builder Web Interface...")
     logger.info(f"Configuration: DEBUG={Config.DEBUG}, HOST={Config.HOST}, PORT={Config.PORT}")
@@ -898,10 +916,15 @@ if __name__ == '__main__':
     
     print("Starting Enhanced Video Documentation Builder Web Interface...")
     print(f"Open your browser and go to: http://{Config.HOST}:{Config.PORT}")
+    print(f"Login: http://{Config.HOST}:{Config.PORT}/")
+    print(f"User Management: http://{Config.HOST}:{Config.PORT}/user-management")
     print(f"Health Dashboard: http://{Config.HOST}:{Config.PORT}/health-dashboard")
     print(f"Health Check API: http://{Config.HOST}:{Config.PORT}/health")
     print(f"Health Summary: http://{Config.HOST}:{Config.PORT}/health/summary")
     print(f"Metrics: http://{Config.HOST}:{Config.PORT}/metrics")
+    print("\nDefault Admin Credentials:")
+    print("Username: admin")
+    print("Password: admin123")
     
     try:
         socketio.run(app, debug=Config.DEBUG, host=Config.HOST, port=Config.PORT)
