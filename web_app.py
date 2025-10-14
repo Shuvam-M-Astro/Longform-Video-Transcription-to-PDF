@@ -30,6 +30,10 @@ import yaml
 # Import health check functionality
 from src.video_doc.health_checks import get_health_status, get_health_summary, get_service_health
 
+# Import authentication functionality
+from src.video_doc.flask_auth import init_auth_system, require_auth, optional_auth, get_current_user_session
+from src.video_doc.auth import Permission
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +68,9 @@ class Config:
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Initialize authentication system
+init_auth_system(app)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -756,12 +763,17 @@ class ProcessingJob:
 
 
 @app.route('/')
+@optional_auth
 def index():
     """Main page with upload form."""
-    return render_template('index.html')
+    user_session = get_current_user_session()
+    if not user_session:
+        return render_template('login.html')
+    return render_template('index.html', user=user_session)
 
 
 @app.route('/upload', methods=['POST'])
+@require_auth(Permission.UPLOAD_FILES)
 def upload_file():
     """Handle file upload."""
     try:
@@ -843,6 +855,7 @@ def upload_file():
 
 
 @app.route('/process_url', methods=['POST'])
+@require_auth(Permission.CREATE_JOB)
 def process_url():
     """Handle URL processing."""
     try:
@@ -950,6 +963,7 @@ def download_file(job_id, file_type):
 
 
 @app.route('/jobs')
+@require_auth(Permission.VIEW_JOB)
 def list_jobs():
     """List all processing jobs."""
     try:
@@ -1174,6 +1188,7 @@ def readiness_probe():
 
 
 @app.route('/metrics')
+@require_auth(Permission.VIEW_METRICS)
 def metrics_endpoint():
     """Prometheus metrics endpoint."""
     try:
@@ -1191,6 +1206,13 @@ def metrics_endpoint():
 def health_dashboard():
     """Health monitoring dashboard."""
     return render_template('health_dashboard.html')
+
+
+@app.route('/user-management')
+@require_auth()
+def user_management():
+    """User management dashboard."""
+    return render_template('user_management.html')
 
 
 @socketio.on('connect')
@@ -1254,9 +1276,14 @@ if __name__ == '__main__':
     
     print("Starting Video Documentation Builder Web Interface...")
     print(f"Open your browser and go to: http://{Config.HOST}:{Config.PORT}")
+    print(f"Login: http://{Config.HOST}:{Config.PORT}/")
+    print(f"User Management: http://{Config.HOST}:{Config.PORT}/user-management")
     print(f"Health Dashboard: http://{Config.HOST}:{Config.PORT}/health-dashboard")
     print(f"Health Check API: http://{Config.HOST}:{Config.PORT}/health")
     print(f"Metrics: http://{Config.HOST}:{Config.PORT}/metrics")
+    print("\nDefault Admin Credentials:")
+    print("Username: admin")
+    print("Password: admin123")
     
     try:
         socketio.run(app, debug=Config.DEBUG, host=Config.HOST, port=Config.PORT)

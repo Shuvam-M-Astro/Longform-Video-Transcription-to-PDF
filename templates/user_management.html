@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Management - Video Processing System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin-bottom: 10px;
+        }
+        
+        .nav {
+            background-color: #f8f9fa;
+            padding: 15px 20px;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        .nav a {
+            color: #667eea;
+            text-decoration: none;
+            margin-right: 20px;
+            font-weight: 500;
+        }
+        
+        .nav a:hover {
+            text-decoration: underline;
+        }
+        
+        .content {
+            padding: 20px;
+        }
+        
+        .user-info {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .user-info h3 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        .user-info p {
+            margin-bottom: 5px;
+            color: #666;
+        }
+        
+        .permissions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .permission-tag {
+            background-color: #667eea;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        
+        .api-keys-section {
+            margin-top: 30px;
+        }
+        
+        .api-keys-section h3 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .create-api-key {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .btn {
+            background-color: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        
+        .btn:hover {
+            background-color: #5a6fd8;
+        }
+        
+        .btn-danger {
+            background-color: #dc3545;
+        }
+        
+        .btn-danger:hover {
+            background-color: #c82333;
+        }
+        
+        .api-key-list {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        
+        .api-key-item {
+            background-color: white;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border: 1px solid #e9ecef;
+        }
+        
+        .api-key-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .api-key-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .api-key-name {
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .api-key-status {
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .status-active {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        
+        .status-expired {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        
+        .api-key-details {
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .api-key-details p {
+            margin-bottom: 5px;
+        }
+        
+        .api-key-value {
+            font-family: monospace;
+            background-color: #f8f9fa;
+            padding: 5px;
+            border-radius: 3px;
+            word-break: break-all;
+            margin-top: 10px;
+        }
+        
+        .logout-btn {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            margin-top: 20px;
+        }
+        
+        .logout-btn:hover {
+            background-color: #c82333;
+        }
+        
+        .error-message {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            display: none;
+        }
+        
+        .success-message {
+            background-color: #d4edda;
+            color: #155724;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>👤 User Management</h1>
+            <p>Manage your account and API keys</p>
+        </div>
+        
+        <div class="nav">
+            <a href="/">🏠 Home</a>
+            <a href="/health-dashboard">📊 Health Dashboard</a>
+            <a href="/jobs">📋 Jobs</a>
+        </div>
+        
+        <div class="content">
+            <div id="error-message" class="error-message"></div>
+            <div id="success-message" class="success-message"></div>
+            
+            <div class="user-info">
+                <h3>User Information</h3>
+                <div id="user-info-content">
+                    <p>Loading user information...</p>
+                </div>
+            </div>
+            
+            <div class="api-keys-section">
+                <h3>API Keys</h3>
+                
+                <div class="create-api-key">
+                    <h4>Create New API Key</h4>
+                    <form id="create-api-key-form">
+                        <div class="form-group">
+                            <label for="key-name">Key Name</label>
+                            <input type="text" id="key-name" name="key_name" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="permissions">Permissions</label>
+                            <select id="permissions" name="permissions" multiple>
+                                <option value="create_job">Create Job</option>
+                                <option value="view_job">View Job</option>
+                                <option value="edit_job">Edit Job</option>
+                                <option value="delete_job">Delete Job</option>
+                                <option value="upload_files">Upload Files</option>
+                                <option value="download_files">Download Files</option>
+                                <option value="view_system_health">View System Health</option>
+                                <option value="view_metrics">View Metrics</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="expires-days">Expires in (days, optional)</label>
+                            <input type="number" id="expires-days" name="expires_days" min="1" max="365">
+                        </div>
+                        
+                        <button type="submit" class="btn">Create API Key</button>
+                    </form>
+                </div>
+                
+                <div class="api-key-list">
+                    <h4>Your API Keys</h4>
+                    <div id="api-keys-list">
+                        <p>Loading API keys...</p>
+                    </div>
+                </div>
+            </div>
+            
+            <button class="logout-btn" onclick="logout()">Logout</button>
+        </div>
+    </div>
+    
+    <script>
+        let currentUser = null;
+        
+        // Load user information
+        async function loadUserInfo() {
+            try {
+                const response = await fetch('/auth/me');
+                if (response.ok) {
+                    const data = await response.json();
+                    currentUser = data.user;
+                    displayUserInfo(data.user);
+                } else {
+                    showError('Failed to load user information');
+                }
+            } catch (error) {
+                showError('Network error loading user information');
+            }
+        }
+        
+        function displayUserInfo(user) {
+            const userInfoContent = document.getElementById('user-info-content');
+            userInfoContent.innerHTML = `
+                <p><strong>Username:</strong> ${user.username}</p>
+                <p><strong>Role:</strong> ${user.role}</p>
+                <p><strong>User ID:</strong> ${user.id}</p>
+                <div class="permissions">
+                    ${user.permissions.map(permission => 
+                        `<span class="permission-tag">${permission}</span>`
+                    ).join('')}
+                </div>
+            `;
+        }
+        
+        // Load API keys
+        async function loadApiKeys() {
+            try {
+                const response = await fetch('/auth/api-keys');
+                if (response.ok) {
+                    const data = await response.json();
+                    displayApiKeys(data.api_keys);
+                } else {
+                    showError('Failed to load API keys');
+                }
+            } catch (error) {
+                showError('Network error loading API keys');
+            }
+        }
+        
+        function displayApiKeys(apiKeys) {
+            const apiKeysList = document.getElementById('api-keys-list');
+            
+            if (apiKeys.length === 0) {
+                apiKeysList.innerHTML = '<p>No API keys found.</p>';
+                return;
+            }
+            
+            apiKeysList.innerHTML = apiKeys.map(key => `
+                <div class="api-key-item">
+                    <div class="api-key-header">
+                        <span class="api-key-name">${key.key_name}</span>
+                        <span class="api-key-status ${key.is_active ? 'status-active' : 'status-expired'}">
+                            ${key.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                    </div>
+                    <div class="api-key-details">
+                        <p><strong>Created:</strong> ${new Date(key.created_at).toLocaleString()}</p>
+                        ${key.expires_at ? `<p><strong>Expires:</strong> ${new Date(key.expires_at).toLocaleString()}</p>` : '<p><strong>Expires:</strong> Never</p>'}
+                        ${key.last_used ? `<p><strong>Last Used:</strong> ${new Date(key.last_used).toLocaleString()}</p>` : '<p><strong>Last Used:</strong> Never</p>'}
+                        <p><strong>Permissions:</strong> ${key.permissions.join(', ')}</p>
+                        ${key.api_key ? `<div class="api-key-value">${key.api_key}</div>` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        // Create API key
+        document.getElementById('create-api-key-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(e.target);
+            const data = {
+                key_name: formData.get('key_name'),
+                permissions: Array.from(document.getElementById('permissions').selectedOptions).map(option => option.value),
+                expires_days: formData.get('expires_days') ? parseInt(formData.get('expires_days')) : null
+            };
+            
+            try {
+                const response = await fetch('/auth/api-keys', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    showSuccess('API key created successfully!');
+                    e.target.reset();
+                    loadApiKeys();
+                } else {
+                    showError(result.error || 'Failed to create API key');
+                }
+            } catch (error) {
+                showError('Network error creating API key');
+            }
+        });
+        
+        // Logout
+        async function logout() {
+            try {
+                const response = await fetch('/auth/logout', {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    localStorage.removeItem('user');
+                    window.location.href = '/';
+                } else {
+                    showError('Logout failed');
+                }
+            } catch (error) {
+                showError('Network error during logout');
+            }
+        }
+        
+        function showError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            setTimeout(() => {
+                errorDiv.style.display = 'none';
+            }, 5000);
+        }
+        
+        function showSuccess(message) {
+            const successDiv = document.getElementById('success-message');
+            successDiv.textContent = message;
+            successDiv.style.display = 'block';
+            setTimeout(() => {
+                successDiv.style.display = 'none';
+            }, 5000);
+        }
+        
+        // Initialize page
+        window.addEventListener('load', function() {
+            loadUserInfo();
+            loadApiKeys();
+        });
+    </script>
+</body>
+</html>
