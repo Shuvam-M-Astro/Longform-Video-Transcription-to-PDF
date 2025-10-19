@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Documentation - Video Processing System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .nav {
+            background-color: #f8f9fa;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 20px;
+        }
+        
+        .nav-links a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+            padding: 8px 16px;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+        
+        .nav-links a:hover {
+            background-color: #e9ecef;
+        }
+        
+        .api-info {
+            background-color: #f8f9fa;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        .api-info h3 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        .api-info p {
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .content {
+            display: flex;
+            min-height: calc(100vh - 200px);
+        }
+        
+        .sidebar {
+            width: 300px;
+            background-color: #f8f9fa;
+            border-right: 1px solid #e9ecef;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        
+        .main-content {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+        }
+        
+        .tag-section {
+            margin-bottom: 30px;
+        }
+        
+        .tag-section h2 {
+            color: #333;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .endpoint {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .endpoint-header {
+            padding: 20px;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .method-badge {
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        
+        .method-get { background-color: #d4edda; color: #155724; }
+        .method-post { background-color: #cce5ff; color: #004085; }
+        .method-put { background-color: #fff3cd; color: #856404; }
+        .method-delete { background-color: #f8d7da; color: #721c24; }
+        
+        .endpoint-path {
+            font-family: monospace;
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .endpoint-summary {
+            color: #666;
+            margin-left: auto;
+        }
+        
+        .endpoint-content {
+            padding: 20px;
+        }
+        
+        .endpoint-description {
+            margin-bottom: 20px;
+            color: #555;
+        }
+        
+        .auth-info {
+            background-color: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .auth-info h4 {
+            color: #004085;
+            margin-bottom: 5px;
+        }
+        
+        .auth-info p {
+            color: #004085;
+            font-size: 14px;
+        }
+        
+        .section {
+            margin-bottom: 20px;
+        }
+        
+        .section h4 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        .parameters, .request-body, .responses {
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            padding: 15px;
+        }
+        
+        .parameter {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        .parameter:last-child {
+            border-bottom: none;
+        }
+        
+        .parameter-name {
+            font-family: monospace;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .parameter-details {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .code-block {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 15px;
+            font-family: monospace;
+            font-size: 14px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+        
+        .response-code {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 12px;
+            margin-right: 10px;
+        }
+        
+        .response-200 { background-color: #d4edda; color: #155724; }
+        .response-201 { background-color: #d4edda; color: #155724; }
+        .response-400 { background-color: #f8d7da; color: #721c24; }
+        .response-401 { background-color: #f8d7da; color: #721c24; }
+        .response-403 { background-color: #f8d7da; color: #721c24; }
+        .response-404 { background-color: #f8d7da; color: #721c24; }
+        .response-500 { background-color: #f8d7da; color: #721c24; }
+        .response-503 { background-color: #f8d7da; color: #721c24; }
+        
+        .example {
+            background-color: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        
+        .example h5 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .try-it-btn {
+            background-color: #667eea;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        
+        .try-it-btn:hover {
+            background-color: #5a6fd8;
+        }
+        
+        .sidebar-section {
+            margin-bottom: 30px;
+        }
+        
+        .sidebar-section h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        
+        .tag-link {
+            display: block;
+            padding: 8px 12px;
+            color: #667eea;
+            text-decoration: none;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            transition: background-color 0.3s;
+        }
+        
+        .tag-link:hover {
+            background-color: #e9ecef;
+        }
+        
+        .tag-link.active {
+            background-color: #667eea;
+            color: white;
+        }
+        
+        .quick-links {
+            background-color: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .quick-links h4 {
+            color: #004085;
+            margin-bottom: 10px;
+        }
+        
+        .quick-links a {
+            display: block;
+            color: #004085;
+            text-decoration: none;
+            padding: 5px 0;
+            font-size: 14px;
+        }
+        
+        .quick-links a:hover {
+            text-decoration: underline;
+        }
+        
+        .search-box {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .stat-item {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            text-align: center;
+            flex: 1;
+        }
+        
+        .stat-number {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        @media (max-width: 768px) {
+            .content {
+                flex-direction: column;
+            }
+            
+            .sidebar {
+                width: 100%;
+                order: 2;
+            }
+            
+            .main-content {
+                order: 1;
+            }
+            
+            .nav {
+                flex-direction: column;
+                gap: 15px;
+            }
+            
+            .nav-links {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📚 API Documentation</h1>
+            <p>Comprehensive API reference for Video Processing System</p>
+        </div>
+        
+        <div class="nav">
+            <div class="nav-links">
+                <a href="/">🏠 Home</a>
+                <a href="/health-dashboard">📊 Health Dashboard</a>
+                <a href="/user-management">👤 User Management</a>
+                <a href="/jobs">📋 Jobs</a>
+            </div>
+            <div>
+                <a href="/api/openapi.json" target="_blank">📄 OpenAPI Spec</a>
+                <a href="/api/endpoints" target="_blank">🔗 Endpoints JSON</a>
+            </div>
+        </div>
+        
+        <div class="api-info">
+            <h3>API Information</h3>
+            <p><strong>Base URL:</strong> <code>http://localhost:5000</code></p>
+            <p><strong>Version:</strong> 1.0.0</p>
+            <p><strong>Authentication:</strong> Session tokens, Bearer tokens, or API keys</p>
+            <p><strong>Content Type:</strong> application/json</p>
+        </div>
+        
+        <div class="content">
+            <div class="sidebar">
+                <div class="sidebar-section">
+                    <h3>📋 Quick Links</h3>
+                    <div class="quick-links">
+                        <h4>Authentication</h4>
+                        <a href="#auth-login">POST /auth/login</a>
+                        <a href="#auth-logout">POST /auth/logout</a>
+                        <a href="#auth-me">GET /auth/me</a>
+                        <a href="#auth-register">POST /auth/register</a>
+                    </div>
+                    <div class="quick-links">
+                        <h4>Jobs</h4>
+                        <a href="#upload">POST /upload</a>
+                        <a href="#process-url">POST /process_url</a>
+                        <a href="#jobs">GET /jobs</a>
+                        <a href="#job-status">GET /job/{id}</a>
+                    </div>
+                    <div class="quick-links">
+                        <h4>Health</h4>
+                        <a href="#health">GET /health</a>
+                        <a href="#health-summary">GET /health/summary</a>
+                        <a href="#metrics">GET /metrics</a>
+                    </div>
+                </div>
+                
+                <div class="sidebar-section">
+                    <h3>🏷️ API Tags</h3>
+                    <a href="#" class="tag-link active" data-tag="all">All Endpoints</a>
+                    <a href="#" class="tag-link" data-tag="Authentication">Authentication</a>
+                    <a href="#" class="tag-link" data-tag="Jobs">Jobs</a>
+                    <a href="#" class="tag-link" data-tag="Health">Health</a>
+                    <a href="#" class="tag-link" data-tag="Monitoring">Monitoring</a>
+                </div>
+                
+                <div class="sidebar-section">
+                    <h3>🔍 Search</h3>
+                    <input type="text" class="search-box" placeholder="Search endpoints..." id="search-box">
+                </div>
+                
+                <div class="sidebar-section">
+                    <h3>📊 Statistics</h3>
+                    <div class="stats">
+                        <div class="stat-item">
+                            <div class="stat-number" id="total-endpoints">{{ endpoints|length }}</div>
+                            <div class="stat-label">Total Endpoints</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-number" id="auth-endpoints">{{ endpoints|selectattr('tags', 'containing', 'Authentication')|list|length }}</div>
+                            <div class="stat-label">Auth Endpoints</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="main-content">
+                <div id="endpoints-content">
+                    <!-- Endpoints will be populated here -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const endpoints = {{ endpoints|tojson }};
+        let filteredEndpoints = endpoints;
+        let currentTag = 'all';
+        
+        function renderEndpoints() {
+            const content = document.getElementById('endpoints-content');
+            const groupedEndpoints = groupEndpointsByTag(filteredEndpoints);
+            
+            let html = '';
+            
+            for (const [tag, tagEndpoints] of Object.entries(groupedEndpoints)) {
+                html += `<div class="tag-section" id="tag-${tag.toLowerCase()}">`;
+                html += `<h2>${tag}</h2>`;
+                
+                for (const endpoint of tagEndpoints) {
+                    html += renderEndpoint(endpoint);
+                }
+                
+                html += '</div>';
+            }
+            
+            content.innerHTML = html;
+        }
+        
+        function groupEndpointsByTag(endpoints) {
+            const grouped = {};
+            
+            for (const endpoint of endpoints) {
+                for (const tag of endpoint.tags) {
+                    if (!grouped[tag]) {
+                        grouped[tag] = [];
+                    }
+                    grouped[tag].push(endpoint);
+                }
+            }
+            
+            return grouped;
+        }
+        
+        function renderEndpoint(endpoint) {
+            const methodClass = `method-${endpoint.method.toLowerCase()}`;
+            const authInfo = endpoint.auth_required ? 
+                `<div class="auth-info">
+                    <h4>🔒 Authentication Required</h4>
+                    <p>This endpoint requires authentication. ${endpoint.permissions.length > 0 ? 'Required permissions: ' + endpoint.permissions.join(', ') : ''}</p>
+                </div>` : '';
+            
+            let parametersHtml = '';
+            if (endpoint.parameters && endpoint.parameters.length > 0) {
+                parametersHtml = '<div class="section"><h4>Parameters</h4><div class="parameters">';
+                for (const param of endpoint.parameters) {
+                    parametersHtml += `
+                        <div class="parameter">
+                            <span class="parameter-name">${param.name}</span>
+                            <span class="parameter-details">${param.description || ''}</span>
+                        </div>
+                    `;
+                }
+                parametersHtml += '</div></div>';
+            }
+            
+            let requestBodyHtml = '';
+            if (endpoint.request_body) {
+                requestBodyHtml = `
+                    <div class="section">
+                        <h4>Request Body</h4>
+                        <div class="request-body">
+                            <div class="code-block">${JSON.stringify(endpoint.request_body, null, 2)}</div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            let responsesHtml = '';
+            if (endpoint.responses) {
+                responsesHtml = '<div class="section"><h4>Responses</h4><div class="responses">';
+                for (const [code, response] of Object.entries(endpoint.responses)) {
+                    const responseClass = `response-${code}`;
+                    responsesHtml += `
+                        <div style="margin-bottom: 15px;">
+                            <span class="response-code ${responseClass}">${code}</span>
+                            <span>${response.description}</span>
+                            ${response.content ? `<div class="code-block">${JSON.stringify(response.content, null, 2)}</div>` : ''}
+                        </div>
+                    `;
+                }
+                responsesHtml += '</div></div>';
+            }
+            
+            let examplesHtml = '';
+            if (endpoint.examples && endpoint.examples.length > 0) {
+                examplesHtml = '<div class="section"><h4>Examples</h4>';
+                for (const example of endpoint.examples) {
+                    examplesHtml += `
+                        <div class="example">
+                            <h5>${example.name}</h5>
+                            <div class="code-block">Request: ${JSON.stringify(example.request, null, 2)}</div>
+                            <div class="code-block">Response: ${JSON.stringify(example.response, null, 2)}</div>
+                        </div>
+                    `;
+                }
+                examplesHtml += '</div>';
+            }
+            
+            return `
+                <div class="endpoint" id="${endpoint.path.replace(/[\/{}]/g, '-')}-${endpoint.method.toLowerCase()}">
+                    <div class="endpoint-header">
+                        <span class="method-badge ${methodClass}">${endpoint.method}</span>
+                        <span class="endpoint-path">${endpoint.path}</span>
+                        <span class="endpoint-summary">${endpoint.summary}</span>
+                    </div>
+                    <div class="endpoint-content">
+                        <div class="endpoint-description">${endpoint.description}</div>
+                        ${authInfo}
+                        ${parametersHtml}
+                        ${requestBodyHtml}
+                        ${responsesHtml}
+                        ${examplesHtml}
+                        <button class="try-it-btn" onclick="tryEndpoint('${endpoint.path}', '${endpoint.method}')">Try it out</button>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function filterByTag(tag) {
+            currentTag = tag;
+            filteredEndpoints = tag === 'all' ? endpoints : endpoints.filter(ep => ep.tags.includes(tag));
+            
+            // Update active tag
+            document.querySelectorAll('.tag-link').forEach(link => {
+                link.classList.remove('active');
+            });
+            document.querySelector(`[data-tag="${tag}"]`).classList.add('active');
+            
+            renderEndpoints();
+        }
+        
+        function searchEndpoints(query) {
+            const searchTerm = query.toLowerCase();
+            filteredEndpoints = endpoints.filter(ep => 
+                ep.path.toLowerCase().includes(searchTerm) ||
+                ep.summary.toLowerCase().includes(searchTerm) ||
+                ep.description.toLowerCase().includes(searchTerm) ||
+                ep.tags.some(tag => tag.toLowerCase().includes(searchTerm))
+            );
+            
+            renderEndpoints();
+        }
+        
+        function tryEndpoint(path, method) {
+            // This would open a modal or redirect to a testing interface
+            alert(`Try endpoint: ${method} ${path}\n\nThis would open an interactive testing interface in a real implementation.`);
+        }
+        
+        // Event listeners
+        document.querySelectorAll('.tag-link').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                filterByTag(e.target.dataset.tag);
+            });
+        });
+        
+        document.getElementById('search-box').addEventListener('input', (e) => {
+            searchEndpoints(e.target.value);
+        });
+        
+        // Initial render
+        renderEndpoints();
+        
+        // Smooth scrolling for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const target = document.querySelector(e.target.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth' });
+                }
+            });
+        });
+    </script>
+</body>
+</html>
