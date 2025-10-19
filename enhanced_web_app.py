@@ -46,6 +46,9 @@ from src.video_doc.health_checks import get_health_status, get_health_summary, g
 from src.video_doc.flask_auth import init_auth_system, require_auth, optional_auth, get_current_user_session
 from src.video_doc.auth import Permission
 
+# Import API documentation functionality
+from src.video_doc.api_docs import create_api_docs_blueprint
+
 logger = get_logger(__name__)
 
 # Configuration
@@ -77,6 +80,10 @@ app.config.from_object(Config)
 
 # Initialize authentication system
 init_auth_system(app)
+
+# Register API documentation blueprint
+api_docs_bp = create_api_docs_blueprint()
+app.register_blueprint(api_docs_bp)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -917,6 +924,8 @@ if __name__ == '__main__':
     print("Starting Enhanced Video Documentation Builder Web Interface...")
     print(f"Open your browser and go to: http://{Config.HOST}:{Config.PORT}")
     print(f"Login: http://{Config.HOST}:{Config.PORT}/")
+    print(f"API Documentation: http://{Config.HOST}:{Config.PORT}/api/docs")
+    print(f"OpenAPI Spec: http://{Config.HOST}:{Config.PORT}/api/openapi.json")
     print(f"User Management: http://{Config.HOST}:{Config.PORT}/user-management")
     print(f"Health Dashboard: http://{Config.HOST}:{Config.PORT}/health-dashboard")
     print(f"Health Check API: http://{Config.HOST}:{Config.PORT}/health")
