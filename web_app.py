@@ -33,9 +33,13 @@ from src.video_doc.health_checks import get_health_status, get_health_summary, g
 # Import authentication functionality
 from src.video_doc.flask_auth import init_auth_system, require_auth, optional_auth, get_current_user_session
 from src.video_doc.auth import Permission
+from src.video_doc.security_enhancements import security_manager, password_policy
+from src.video_doc.user_management import user_manager, session_manager
+from src.video_doc.enhanced_api_docs import create_api_docs_blueprint
 
-# Import API documentation functionality
-from src.video_doc.api_docs import create_api_docs_blueprint
+# Register API documentation blueprint
+api_docs_bp = create_api_docs_blueprint()
+app.register_blueprint(api_docs_bp)
 
 # Configure logging
 logging.basicConfig(
