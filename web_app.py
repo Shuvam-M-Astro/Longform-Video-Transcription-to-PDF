@@ -1223,7 +1223,126 @@ def health_dashboard():
 @require_auth()
 def user_management():
     """User management dashboard."""
-    return render_template('user_management.html')
+    user_session = get_current_user_session()
+    return render_template('user_management.html', user=user_session)
+
+@app.route('/security-dashboard')
+@require_auth(Permission.VIEW_METRICS)
+def security_dashboard():
+    """Security monitoring dashboard."""
+    return render_template('security_dashboard.html')
+
+@app.route('/api/security/summary')
+@require_auth(Permission.VIEW_METRICS)
+def security_summary():
+    """Get security summary for dashboard."""
+    try:
+        summary = security_manager.get_security_summary()
+        return jsonify(summary)
+    except Exception as e:
+        logger.error(f"Failed to get security summary: {str(e)}")
+        return jsonify({"error": "Failed to get security summary"}), 500
+
+@app.route('/api/user/profile')
+@require_auth()
+def get_user_profile():
+    """Get current user's profile."""
+    try:
+        user_session = get_current_user_session()
+        profile = user_manager.get_user_profile(user_session.user_id)
+        if profile:
+            return jsonify(asdict(profile))
+        else:
+            return jsonify({"error": "Profile not found"}), 404
+    except Exception as e:
+        logger.error(f"Failed to get user profile: {str(e)}")
+        return jsonify({"error": "Failed to get profile"}), 500
+
+@app.route('/api/user/preferences', methods=['POST'])
+@require_auth()
+def update_user_preferences():
+    """Update user preferences."""
+    try:
+        user_session = get_current_user_session()
+        preferences = request.get_json()
+        
+        success = user_manager.update_user_preferences(user_session.user_id, preferences)
+        if success:
+            return jsonify({"message": "Preferences updated successfully"})
+        else:
+            return jsonify({"error": "Failed to update preferences"}), 400
+    except Exception as e:
+        logger.error(f"Failed to update preferences: {str(e)}")
+        return jsonify({"error": "Failed to update preferences"}), 500
+
+@app.route('/api/user/change-password', methods=['POST'])
+@require_auth()
+def change_password():
+    """Change user password."""
+    try:
+        user_session = get_current_user_session()
+        data = request.get_json()
+        
+        result = user_manager.change_password(
+            user_session.user_id,
+            data.get('old_password'),
+            data.get('new_password')
+        )
+        
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Failed to change password: {str(e)}")
+        return jsonify({"success": False, "error": "Password change failed"}), 500
+
+@app.route('/api/user/sessions')
+@require_auth()
+def get_user_sessions():
+    """Get user's active sessions."""
+    try:
+        user_session = get_current_user_session()
+        sessions = session_manager.get_user_sessions(user_session.user_id)
+        return jsonify({"sessions": sessions})
+    except Exception as e:
+        logger.error(f"Failed to get user sessions: {str(e)}")
+        return jsonify({"error": "Failed to get sessions"}), 500
+
+@app.route('/api/user/sessions/<session_id>/revoke', methods=['POST'])
+@require_auth()
+def revoke_session(session_id):
+    """Revoke a specific session."""
+    try:
+        user_session = get_current_user_session()
+        success = session_manager.revoke_session(session_id, user_session.user_id)
+        if success:
+            return jsonify({"message": "Session revoked successfully"})
+        else:
+            return jsonify({"error": "Session not found"}), 404
+    except Exception as e:
+        logger.error(f"Failed to revoke session: {str(e)}")
+        return jsonify({"error": "Failed to revoke session"}), 500
+
+@app.route('/api/user/sessions/revoke-all', methods=['POST'])
+@require_auth()
+def revoke_all_sessions():
+    """Revoke all user sessions."""
+    try:
+        user_session = get_current_user_session()
+        count = session_manager.revoke_all_sessions(user_session.user_id, user_session.user_id)
+        return jsonify({"message": f"Revoked {count} sessions successfully"})
+    except Exception as e:
+        logger.error(f"Failed to revoke all sessions: {str(e)}")
+        return jsonify({"error": "Failed to revoke sessions"}), 500
+
+@app.route('/api/admin/user-statistics')
+@require_auth(Permission.MANAGE_USERS)
+def get_user_statistics():
+    """Get user statistics for admin dashboard."""
+    try:
+        stats = user_manager.get_user_statistics()
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"Failed to get user statistics: {str(e)}")
+        return jsonify({"error": "Failed to get statistics"}), 500
 
 
 @socketio.on('connect')
@@ -1285,18 +1404,35 @@ if __name__ == '__main__':
     logger.info(f"Max concurrent jobs: {Config.MAX_CONCURRENT_JOBS}")
     logger.info(f"Job timeout: {Config.JOB_TIMEOUT}s")
     
-    print("Starting Video Documentation Builder Web Interface...")
-    print(f"Open your browser and go to: http://{Config.HOST}:{Config.PORT}")
-    print(f"Login: http://{Config.HOST}:{Config.PORT}/")
-    print(f"API Documentation: http://{Config.HOST}:{Config.PORT}/api/docs")
-    print(f"OpenAPI Spec: http://{Config.HOST}:{Config.PORT}/api/openapi.json")
-    print(f"User Management: http://{Config.HOST}:{Config.PORT}/user-management")
-    print(f"Health Dashboard: http://{Config.HOST}:{Config.PORT}/health-dashboard")
-    print(f"Health Check API: http://{Config.HOST}:{Config.PORT}/health")
-    print(f"Metrics: http://{Config.HOST}:{Config.PORT}/metrics")
-    print("\nDefault Admin Credentials:")
-    print("Username: admin")
-    print("Password: admin123")
+    print("\n" + "="*80)
+    print("🚀 VIDEO PROCESSING SYSTEM STARTED SUCCESSFULLY!")
+    print("="*80)
+    print(f"📊 Web Interface: http://{Config.HOST}:{Config.PORT}")
+    print(f"🔐 Login Page: http://{Config.HOST}:{Config.PORT}/login")
+    print(f"👤 User Management: http://{Config.HOST}:{Config.PORT}/user-management")
+    print(f"🛡️ Security Dashboard: http://{Config.HOST}:{Config.PORT}/security-dashboard")
+    print(f"📚 API Documentation: http://{Config.HOST}:{Config.PORT}/api/docs")
+    print(f"💚 Health Dashboard: http://{Config.HOST}:{Config.PORT}/health-dashboard")
+    print(f"🔍 Health Check: http://{Config.HOST}:{Config.PORT}/health")
+    print(f"📈 Metrics: http://{Config.HOST}:{Config.PORT}/metrics")
+    print("="*80)
+    print("🔑 DEFAULT ADMIN CREDENTIALS:")
+    print("   Username: admin")
+    print("   Password: admin123")
+    print("="*80)
+    print("🛡️ SECURITY FEATURES:")
+    print("   ✅ Rate limiting and suspicious activity detection")
+    print("   ✅ Password policy enforcement")
+    print("   ✅ Session management and revocation")
+    print("   ✅ API key management")
+    print("   ✅ Comprehensive audit logging")
+    print("="*80)
+    print("📚 API FEATURES:")
+    print("   ✅ Interactive Swagger documentation")
+    print("   ✅ Permission-based endpoint access")
+    print("   ✅ Client code generation")
+    print("   ✅ Real-time testing interface")
+    print("="*80)
     
     try:
         socketio.run(app, debug=Config.DEBUG, host=Config.HOST, port=Config.PORT)
