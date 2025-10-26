@@ -49,8 +49,11 @@ COPY --from=builder /root/.local /home/videoapp/.local
 
 # Copy application code
 COPY src/ ./src/
-COPY enhanced_main.py .
-COPY enhanced_web_app.py .
+COPY main.py .
+COPY app.py .
+COPY web_app.py .
+COPY batch_process.py .
+COPY batch_process_advanced.py .
 COPY init_database.py .
 COPY alembic/ ./alembic/
 COPY alembic.ini .
@@ -75,4 +78,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:5000/health')" || exit 1
 
 # Default command
-CMD ["python", "enhanced_web_app.py"]
+CMD ["python", "web_app.py"]

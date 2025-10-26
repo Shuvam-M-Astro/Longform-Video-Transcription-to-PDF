@@ -201,7 +201,7 @@ spec:
       containers:
       - name: web
         image: video-processing:latest
-        command: ["python", "enhanced_web_app.py"]
+        command: ["python", "web_app.py"]
         ports:
         - containerPort: 5000
         env:
