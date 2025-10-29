@@ -37,10 +37,6 @@ from src.video_doc.security_enhancements import security_manager, password_polic
 from src.video_doc.user_management import user_manager, session_manager
 from src.video_doc.enhanced_api_docs import create_api_docs_blueprint
 
-# Register API documentation blueprint
-api_docs_bp = create_api_docs_blueprint()
-app.register_blueprint(api_docs_bp)
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -146,7 +142,7 @@ def validate_processing_options(options: Dict[str, Any]) -> None:
         raise ValidationError(f"Invalid language. Must be one of: {', '.join(valid_languages)}")
     
     # Whisper model validation
-    valid_models = {'tiny', 'base', 'small', 'medium', 'large'}
+    valid_models = {'tiny', 'base', 'small', 'medium', 'large', 'large-v3'}
     if options.get('whisper_model') not in valid_models:
         raise ValidationError(f"Invalid whisper model. Must be one of: {', '.join(valid_models)}")
     
