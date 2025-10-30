@@ -126,10 +126,26 @@ class DatabaseTask(Task):
         if self.db_session:
             self.db_session.close()
             logger.error(f"Database session closed after failure for task {task_id}")
+        try:
+            metrics.increment_task_failure(getattr(self, 'name', 'unknown'), type(exc).__name__)
+        except Exception:
+            pass
     
     def on_retry(self, exc, task_id, args, kwargs, einfo):
         """Handle task retry."""
         logger.warning(f"Task {task_id} retrying due to: {exc}")
+        try:
+            metrics.increment_task_retry(getattr(self, 'name', 'unknown'))
+        except Exception:
+            pass
+
+
+# Utility to enqueue tasks with enqueued_at header
+def _apply_async_with_headers(task_sig, args=None, kwargs=None, queue: Optional[str] = None):
+    args = args or []
+    kwargs = kwargs or {}
+    headers = {"enqueued_at": time.time()}
+    return task_sig.apply_async(args=args, kwargs=kwargs, headers=headers, queue=queue)
 
 
 # Task definitions
@@ -154,9 +170,9 @@ def process_video_task(self, job_id: str, job_config: Dict[str, Any]) -> Dict[st
                 
                 # Process based on job type
                 if job_config.get('job_type') == 'url':
-                    result = process_url_video.delay(job_id, job_config)
+                    result = _apply_async_with_headers(process_url_video, args=[job_id, job_config], queue='video_processing')
                 else:
-                    result = process_file_video.delay(job_id, job_config)
+                    result = _apply_async_with_headers(process_file_video, args=[job_id, job_config], queue='video_processing')
                 
                 # Wait for completion with timeout
                 try:
@@ -220,8 +236,8 @@ def process_url_video(self, job_id: str, job_config: Dict[str, Any]) -> Dict[str
             )
             
             # Process downloaded video
-            audio_result = process_audio_task.delay(job_id, {"video_path": str(video_path)})
-            video_result = process_frames_task.delay(job_id, {"video_path": str(video_path)}) if not job_config.get('transcribe_only', False) else None
+            audio_result = _apply_async_with_headers(process_audio_task, args=[job_id, {"video_path": str(video_path)}], queue='audio_processing')
+            video_result = _apply_async_with_headers(process_frames_task, args=[job_id, {"video_path": str(video_path)}], queue='frame_processing') if not job_config.get('transcribe_only', False) else None
         
         # Update step status
         self.job_manager.update_step_status(str(step.id), ProcessingStatus.COMPLETED)
@@ -253,8 +269,8 @@ def process_file_video(self, job_id: str, job_config: Dict[str, Any]) -> Dict[st
         video_path = job_config['file_path']
         
         # Process audio and video in parallel
-        audio_result = process_audio_task.delay(job_id, {"video_path": video_path})
-        video_result = process_frames_task.delay(job_id, {"video_path": video_path}) if not job_config.get('transcribe_only', False) else None
+        audio_result = _apply_async_with_headers(process_audio_task, args=[job_id, {"video_path": video_path}], queue='audio_processing')
+        video_result = _apply_async_with_headers(process_frames_task, args=[job_id, {"video_path": video_path}], queue='frame_processing') if not job_config.get('transcribe_only', False) else None
         
         # Wait for results
         audio_result_data = audio_result.get(timeout=1800)  # 30 minutes
@@ -296,7 +312,7 @@ def process_audio_task(self, job_id: str, audio_config: Dict[str, Any]) -> Dict[
         self.job_manager.update_step_status(str(step.id), ProcessingStatus.COMPLETED)
         
         # Process transcription
-        transcription_result = process_transcription_task.delay(job_id, {"audio_path": str(audio_path)})
+        transcription_result = _apply_async_with_headers(process_transcription_task, args=[job_id, {"audio_path": str(audio_path)}], queue='transcription')
         transcription_data = transcription_result.get(timeout=1800)  # 30 minutes
         
         return {
@@ -394,11 +410,11 @@ def process_frames_task(self, job_id: str, frames_config: Dict[str, Any]) -> Dic
         self.job_manager.update_step_status(str(step.id), ProcessingStatus.COMPLETED)
         
         # Process classification
-        classification_result = process_classification_task.delay(job_id, {
+        classification_result = _apply_async_with_headers(process_classification_task, args=[job_id, {
             "keyframe_paths": [str(p) for p in keyframe_paths],
             "classified_dir": str(classified_dir),
             "snippets_dir": str(snippets_dir)
-        })
+        }], queue='classification')
         classification_data = classification_result.get(timeout=1800)  # 30 minutes
         
         return {
@@ -507,12 +523,49 @@ def worker_ready_handler(sender=None, **kwargs):
 def task_prerun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, **kwds):
     """Handle task prerun signal."""
     logger.info(f"Task {task_id} starting", task_name=task.name)
+    try:
+        # Queue wait time
+        enq = None
+        if hasattr(task, 'request'):
+            headers = getattr(task.request, 'headers', None) or {}
+            if isinstance(headers, dict):
+                enq = headers.get('enqueued_at')
+        if enq is not None:
+            wait_s = max(0.0, time.time() - float(enq))
+            queue_name = 'unknown'
+            try:
+                delivery = getattr(task.request, 'delivery_info', {}) or {}
+                queue_name = delivery.get('routing_key') or delivery.get('exchange') or 'default'
+            except Exception:
+                pass
+            metrics.observe_task_queue_wait(task.name if task else 'unknown', queue_name, wait_s)
+        # Mark start time for duration
+        if hasattr(task, 'request'):
+            setattr(task.request, '_metrics_start_time', time.time())
+    except Exception:
+        pass
 
 
 @task_postrun.connect
 def task_postrun_handler(sender=None, task_id=None, task=None, args=None, kwargs=None, retval=None, state=None, **kwds):
     """Handle task postrun signal."""
     logger.info(f"Task {task_id} completed", task_name=task.name, state=state)
+    try:
+        start = None
+        queue_name = 'unknown'
+        if hasattr(task, 'request'):
+            start = getattr(task.request, '_metrics_start_time', None)
+            try:
+                delivery = getattr(task.request, 'delivery_info', {}) or {}
+                queue_name = delivery.get('routing_key') or delivery.get('exchange') or 'default'
+            except Exception:
+                pass
+        if start is not None:
+            duration = max(0.0, time.time() - float(start))
+            status = 'success' if (state or '').upper() == 'SUCCESS' else 'failure'
+            metrics.observe_task_duration(task.name if task else 'unknown', queue_name, status, duration)
+    except Exception:
+        pass
 
 
 # Utility functions

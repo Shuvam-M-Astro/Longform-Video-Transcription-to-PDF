@@ -186,6 +186,46 @@ class MetricsCollector:
             ['path'],
             registry=self.registry
         )
+
+        # Celery task metrics
+        self.task_queue_wait = Histogram(
+            'video_processing_task_queue_wait_seconds',
+            'Time tasks spent waiting in the queue before starting',
+            ['task_name', 'queue'],
+            buckets=[0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300],
+            registry=self.registry
+        )
+
+        self.task_processing_duration = Histogram(
+            'video_processing_task_duration_seconds',
+            'Duration of Celery task execution (run time)',
+            ['task_name', 'queue', 'status'],
+            buckets=[0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900, 1800],
+            registry=self.registry
+        )
+
+        self.task_retries_total = Counter(
+            'video_processing_task_retries_total',
+            'Total number of task retries',
+            ['task_name'],
+            registry=self.registry
+        )
+
+        self.task_failures_total = Counter(
+            'video_processing_task_failures_total',
+            'Total number of task failures',
+            ['task_name', 'error_type'],
+            registry=self.registry
+        )
+
+        # Model inference metrics
+        self.model_inference_duration = Histogram(
+            'video_processing_model_inference_seconds',
+            'Duration of model inference (e.g., Whisper transcription)',
+            ['model', 'device'],
+            buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900, 1800],
+            registry=self.registry
+        )
     
     def increment_job(self, job_type: str, status: str):
         """Increment job counter."""
@@ -234,6 +274,38 @@ class MetricsCollector:
     def get_metrics(self) -> str:
         """Get metrics in Prometheus format."""
         return generate_latest(self.registry)
+
+    # Celery helpers
+    def observe_task_queue_wait(self, task_name: str, queue: str, wait_seconds: float):
+        try:
+            self.task_queue_wait.labels(task_name=task_name, queue=queue).observe(max(0.0, float(wait_seconds)))
+        except Exception:
+            pass
+
+    def observe_task_duration(self, task_name: str, queue: str, status: str, duration_seconds: float):
+        try:
+            self.task_processing_duration.labels(task_name=task_name, queue=queue, status=status).observe(max(0.0, float(duration_seconds)))
+        except Exception:
+            pass
+
+    def increment_task_retry(self, task_name: str):
+        try:
+            self.task_retries_total.labels(task_name=task_name).inc()
+        except Exception:
+            pass
+
+    def increment_task_failure(self, task_name: str, error_type: str):
+        try:
+            self.task_failures_total.labels(task_name=task_name, error_type=error_type).inc()
+        except Exception:
+            pass
+
+    # Model helpers
+    def observe_model_inference(self, model: str, device: str, duration_seconds: float):
+        try:
+            self.model_inference_duration.labels(model=model, device=device).observe(max(0.0, float(duration_seconds)))
+        except Exception:
+            pass
 
 
 # Global metrics collector

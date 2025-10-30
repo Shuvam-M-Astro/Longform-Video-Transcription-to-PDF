@@ -8,6 +8,9 @@ import wave
 
 from faster_whisper import WhisperModel
 import os
+import time
+
+from src.video_doc.monitoring import metrics
 
 
 @dataclass
@@ -84,13 +87,25 @@ def transcribe_audio(
         )
 
     try:
+        _t0 = time.time()
         segments_iter, info = _do_transcribe(model)
+        _duration = time.time() - _t0
+        try:
+            metrics.observe_model_inference(model=model_size, device=('cuda' if prefer_cuda else 'cpu'), duration_seconds=_duration)
+        except Exception:
+            pass
     except Exception as e:
         msg = str(e).lower()
         if prefer_cuda and ("cublas" in msg or "cuda" in msg or "cudnn" in msg):
             print(f"[transcribe] CUDA error during transcription ({e}). Retrying on CPU...")
             model = _init_model(model_size, prefer_cuda=False, cpu_threads=cpu_threads, num_workers=num_workers)
+            _t0 = time.time()
             segments_iter, info = _do_transcribe(model)
+            _duration = time.time() - _t0
+            try:
+                metrics.observe_model_inference(model=model_size, device='cpu', duration_seconds=_duration)
+            except Exception:
+                pass
         else:
             raise
 
