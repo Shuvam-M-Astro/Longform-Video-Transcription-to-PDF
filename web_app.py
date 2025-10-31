@@ -632,6 +632,32 @@ class ProcessingJob:
             self.end_time = time.time()
             self._emit_status_update()
             
+            # Automatically index transcript for search (async, non-blocking)
+            try:
+                from src.video_doc.search import get_search_service
+                import threading
+                
+                def index_in_background():
+                    try:
+                        search_service = get_search_service()
+                        success = search_service.index_transcript(
+                            job_id=self.job_id,
+                            segments_json_path=segments_json
+                        )
+                        if success:
+                            logger.info(f"Successfully indexed transcript for job {self.job_id}")
+                        else:
+                            logger.warning(f"Failed to index transcript for job {self.job_id}")
+                    except Exception as e:
+                        logger.error(f"Error indexing transcript for job {self.job_id}: {e}")
+                
+                # Start indexing in background thread
+                index_thread = threading.Thread(target=index_in_background, daemon=True)
+                index_thread.start()
+                logger.info(f"Started background indexing for job {self.job_id}")
+            except Exception as e:
+                logger.warning(f"Could not start indexing for job {self.job_id}: {e}")
+            
         except Exception as e:
             self.status = 'failed'
             self.error_message = str(e)
@@ -1339,6 +1365,166 @@ def get_user_statistics():
     except Exception as e:
         logger.error(f"Failed to get user statistics: {str(e)}")
         return jsonify({"error": "Failed to get statistics"}), 500
+
+
+# Search API Endpoints
+@app.route('/api/search', methods=['POST'])
+@require_auth(Permission.VIEW_JOB)
+def search_transcripts():
+    """Perform cross-language semantic search across transcripts."""
+    try:
+        from src.video_doc.search import get_search_service
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        query = data.get('query')
+        if not query or not query.strip():
+            return jsonify({'error': 'Query is required'}), 400
+        
+        target_language = data.get('target_language')  # Language to return results in
+        job_ids = data.get('job_ids')  # Optional: filter by specific jobs
+        limit = int(data.get('limit', 10))
+        min_score = float(data.get('min_score', 0.5))
+        
+        search_service = get_search_service()
+        results = search_service.search(
+            query=query,
+            target_language=target_language,
+            job_ids=job_ids,
+            limit=limit,
+            min_score=min_score
+        )
+        
+        return jsonify({
+            'query': query,
+            'target_language': target_language,
+            'results': results,
+            'count': len(results)
+        })
+        
+    except Exception as e:
+        logger.error(f"Search error: {e}", exc_info=True)
+        return jsonify({'error': 'Search failed', 'message': str(e)}), 500
+
+
+@app.route('/api/search/index/<job_id>', methods=['POST'])
+@require_auth(Permission.VIEW_JOB)
+def index_job(job_id):
+    """Manually trigger indexing for a completed job."""
+    try:
+        from src.video_doc.search import get_search_service
+        from pathlib import Path
+        
+        # Check if job exists and is completed
+        with job_lock:
+            if job_id not in processing_jobs:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            job = processing_jobs[job_id]
+            if job.status != 'completed':
+                return jsonify({'error': 'Job must be completed before indexing'}), 400
+        
+        # Find segments.json file
+        output_dir = Path(app.config['OUTPUT_FOLDER']) / job_id
+        segments_json = output_dir / 'transcript' / 'segments.json'
+        
+        if not segments_json.exists():
+            return jsonify({'error': 'Transcript not found for this job'}), 404
+        
+        # Index the transcript
+        search_service = get_search_service()
+        success = search_service.index_transcript(
+            job_id=job_id,
+            segments_json_path=segments_json
+        )
+        
+        if success:
+            return jsonify({
+                'message': 'Indexing started successfully',
+                'job_id': job_id
+            })
+        else:
+            return jsonify({'error': 'Indexing failed'}), 500
+            
+    except Exception as e:
+        logger.error(f"Indexing error: {e}", exc_info=True)
+        return jsonify({'error': 'Indexing failed', 'message': str(e)}), 500
+
+
+@app.route('/api/search/index-status/<job_id>')
+@require_auth(Permission.VIEW_JOB)
+def get_index_status(job_id):
+    """Get indexing status for a job."""
+    try:
+        from src.video_doc.search import SearchIndex
+        from src.video_doc.database import get_db_session
+        import uuid
+        
+        db = get_db_session()
+        try:
+            try:
+                job_uuid = uuid.UUID(job_id)
+            except ValueError:
+                return jsonify({'error': 'Invalid job ID'}), 400
+            
+            search_index = db.query(SearchIndex).filter(
+                SearchIndex.job_id == job_uuid
+            ).first()
+            
+            if not search_index:
+                return jsonify({
+                    'indexed': False,
+                    'status': 'not_indexed'
+                })
+            
+            return jsonify({
+                'indexed': search_index.status == 'completed',
+                'status': search_index.status,
+                'total_chunks': search_index.total_chunks,
+                'indexed_chunks': search_index.indexed_chunks,
+                'indexed_at': search_index.indexed_at.isoformat() if search_index.indexed_at else None,
+                'error_message': search_index.error_message
+            })
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error getting index status: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get index status'}), 500
+
+
+@app.route('/api/search/jobs')
+@require_auth(Permission.VIEW_JOB)
+def list_indexed_jobs():
+    """List all jobs that have been indexed."""
+    try:
+        from src.video_doc.search import SearchIndex
+        from src.video_doc.database import get_db_session
+        
+        db = get_db_session()
+        try:
+            indexes = db.query(SearchIndex).filter(
+                SearchIndex.status == 'completed'
+            ).all()
+            
+            jobs = [{
+                'job_id': str(idx.job_id),
+                'total_chunks': idx.total_chunks,
+                'indexed_at': idx.indexed_at.isoformat() if idx.indexed_at else None
+            } for idx in indexes]
+            
+            return jsonify({
+                'jobs': jobs,
+                'count': len(jobs)
+            })
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error listing indexed jobs: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to list indexed jobs'}), 500
 
 
 @socketio.on('connect')

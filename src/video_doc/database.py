@@ -417,3 +417,11 @@ class JobManager:
 
 # Import authentication models
 from .auth import User, UserSession, APIKey
+
+# Import search models (imported here to ensure they're registered with Base)
+# They're defined in search.py but need to be imported for Alembic migrations
+try:
+    from .search import TranscriptChunk, SearchIndex
+except ImportError:
+    # Models will be available after search.py is fully loaded
+    pass

@@ -67,6 +67,15 @@ class VideoProcessor {
             });
         }
 
+        // Search form
+        const searchForm = document.getElementById('searchForm');
+        if (searchForm) {
+            searchForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                this.handleSearch();
+            });
+        }
+
         // Download buttons
         document.getElementById('downloadPdf')?.addEventListener('click', (e) => {
             e.preventDefault();
@@ -517,6 +526,132 @@ class VideoProcessor {
         const allExtensions = [...videoExtensions, ...audioExtensions];
         
         return allExtensions.some(ext => filename.toLowerCase().endsWith(ext));
+    }
+
+    async handleSearch() {
+        const queryInput = document.getElementById('searchQuery');
+        const targetLanguageSelect = document.getElementById('searchTargetLanguage');
+        
+        const query = queryInput.value.trim();
+        if (!query) {
+            this.showNotification('Please enter a search query', 'warning');
+            return;
+        }
+
+        const targetLanguage = targetLanguageSelect.value || null;
+
+        try {
+            // Show loading state
+            const searchButton = document.querySelector('#searchForm button[type="submit"]');
+            const originalText = searchButton.innerHTML;
+            searchButton.disabled = true;
+            searchButton.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Searching...';
+
+            const response = await fetch('/api/search', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    query: query,
+                    target_language: targetLanguage,
+                    limit: 20,
+                    min_score: 0.3
+                })
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                this.displaySearchResults(data);
+                this.showNotification(`Found ${data.count} results`, 'success');
+            } else {
+                throw new Error(data.error || 'Search failed');
+            }
+        } catch (error) {
+            console.error('Search error:', error);
+            this.showNotification(`Search failed: ${error.message}`, 'error');
+            document.getElementById('searchResults').style.display = 'none';
+        } finally {
+            // Restore button
+            const searchButton = document.querySelector('#searchForm button[type="submit"]');
+            if (searchButton) {
+                searchButton.disabled = false;
+                searchButton.innerHTML = '<i class="fas fa-search me-2"></i>Search';
+            }
+        }
+    }
+
+    displaySearchResults(data) {
+        const resultsContainer = document.getElementById('searchResults');
+        const resultsList = document.getElementById('searchResultsList');
+
+        if (!resultsContainer || !resultsList) return;
+
+        if (data.count === 0) {
+            resultsList.innerHTML = '<div class="text-muted p-3">No results found</div>';
+            resultsContainer.style.display = 'block';
+            return;
+        }
+
+        const resultsHtml = data.results.map((result, index) => {
+            const similarityPercent = Math.round(result.similarity * 100);
+            const timeStr = this.formatTime(result.start_time);
+            
+            // Show translation indicator if result was translated
+            const translationIndicator = result.original_language !== (data.target_language || result.original_language)
+                ? '<span class="badge bg-info ms-2" title="Translated from ' + result.original_language + '">Translated</span>'
+                : '';
+
+            return `
+                <div class="list-group-item">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <small class="text-muted">#${index + 1} • ${timeStr}</small>
+                        <span class="badge bg-success">${similarityPercent}% match</span>
+                    </div>
+                    <p class="mb-2">${this.highlightQuery(result.text, data.query)}</p>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <small class="text-muted">
+                            Job: ${result.job_id.substring(0, 8)}...
+                            ${translationIndicator}
+                        </small>
+                        <button class="btn btn-sm btn-outline-primary" onclick="videoProcessor.jumpToTimestamp('${result.job_id}', ${result.start_time})">
+                            <i class="fas fa-play me-1"></i>View
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        resultsList.innerHTML = resultsHtml;
+        resultsContainer.style.display = 'block';
+        
+        // Scroll to results
+        resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    highlightQuery(text, query) {
+        if (!query) return text;
+        const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+        return text.replace(regex, '<mark>$1</mark>');
+    }
+
+    formatTime(seconds) {
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = Math.floor(seconds % 60);
+        
+        if (hours > 0) {
+            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    jumpToTimestamp(jobId, timestamp) {
+        // Open job details or navigate to specific timestamp
+        // This could open a modal or navigate to a job view with transcript
+        this.showNotification(`Jumping to ${this.formatTime(timestamp)} in job ${jobId.substring(0, 8)}...`, 'info');
+        // TODO: Implement navigation to transcript view with timestamp
     }
 }
 
