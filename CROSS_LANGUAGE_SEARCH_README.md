@@ -207,3 +207,4 @@ pip install sentence-transformers transformers langdetect googletrans
 - Results are filtered by user access rights
 - Indexing is automatic but can be disabled per job if needed
 
+
