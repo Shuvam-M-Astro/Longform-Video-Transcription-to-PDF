@@ -995,6 +995,75 @@ def download_file(job_id, file_type):
     return send_file(file_path, as_attachment=True)
 
 
+@app.route('/job/<job_id>/transcript')
+@require_auth(Permission.VIEW_JOB)
+def view_transcript(job_id):
+    """View transcript for a job."""
+    try:
+        # Check if job exists in memory or on disk
+        job_exists = False
+        job_completed = False
+        
+        with job_lock:
+            if job_id in processing_jobs:
+                job = processing_jobs[job_id]
+                job_exists = True
+                job_completed = (job.status == 'completed')
+        
+        # Also check if transcript file exists on disk (for jobs that completed before server restart)
+        if not job_completed:
+            output_dir = Path(app.config['OUTPUT_FOLDER']) / job_id
+            segments_json = output_dir / 'transcript' / 'segments.json'
+            if segments_json.exists():
+                job_exists = True
+                job_completed = True
+        
+        if not job_exists:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        if not job_completed:
+            return jsonify({'error': 'Job not completed'}), 400
+        
+        # Get timestamp from query parameter
+        timestamp = request.args.get('t', type=float)
+        
+        return render_template('transcript_viewer.html', job_id=job_id, timestamp=timestamp)
+    except Exception as e:
+        logger.error(f"Error viewing transcript for job {job_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to load transcript'}), 500
+
+
+@app.route('/api/job/<job_id>/transcript/segments')
+@require_auth(Permission.VIEW_JOB)
+def get_transcript_segments(job_id):
+    """Get transcript segments for a job."""
+    try:
+        # Load segments from JSON file (check disk directly, not just memory)
+        output_dir = Path(app.config['OUTPUT_FOLDER']) / job_id
+        segments_json = output_dir / 'transcript' / 'segments.json'
+        
+        if not segments_json.exists():
+            # Check if job exists in memory to provide better error message
+            with job_lock:
+                if job_id in processing_jobs:
+                    job = processing_jobs[job_id]
+                    if job.status != 'completed':
+                        return jsonify({'error': 'Job not completed'}), 400
+            return jsonify({'error': 'Transcript not found'}), 404
+        
+        with open(segments_json, 'r', encoding='utf-8') as f:
+            segments = json.load(f)
+        
+        return jsonify({
+            'job_id': job_id,
+            'segments': segments,
+            'count': len(segments)
+        })
+    except Exception as e:
+        logger.error(f"Error getting transcript segments for job {job_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to load transcript segments'}), 500
+
+
 @app.route('/jobs')
 @require_auth(Permission.VIEW_JOB)
 def list_jobs():

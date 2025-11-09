@@ -648,10 +648,10 @@ class VideoProcessor {
     }
 
     jumpToTimestamp(jobId, timestamp) {
-        // Open job details or navigate to specific timestamp
-        // This could open a modal or navigate to a job view with transcript
-        this.showNotification(`Jumping to ${this.formatTime(timestamp)} in job ${jobId.substring(0, 8)}...`, 'info');
-        // TODO: Implement navigation to transcript view with timestamp
+        // Navigate to transcript viewer with timestamp
+        const url = `/job/${jobId}/transcript?t=${timestamp}`;
+        window.open(url, '_blank');
+        this.showNotification(`Opening transcript at ${this.formatTime(timestamp)}...`, 'info');
     }
 }
 
