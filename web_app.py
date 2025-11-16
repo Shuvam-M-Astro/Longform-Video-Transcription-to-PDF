@@ -16,9 +16,10 @@ import json
 import logging
 import threading
 import time
+import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import re
 from urllib.parse import urlparse
@@ -68,6 +69,12 @@ class Config:
     # Processing limits
     MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', 3))
     JOB_TIMEOUT = int(os.environ.get('JOB_TIMEOUT', 3600))  # 1 hour
+    
+    # Cleanup configuration
+    CLEANUP_INTERVAL = int(os.environ.get('CLEANUP_INTERVAL', 3600))  # Run cleanup every hour
+    JOB_RETENTION_DAYS = int(os.environ.get('JOB_RETENTION_DAYS', 7))  # Keep completed jobs for 7 days
+    FAILED_JOB_RETENTION_DAYS = int(os.environ.get('FAILED_JOB_RETENTION_DAYS', 1))  # Keep failed jobs for 1 day
+    UPLOAD_RETENTION_DAYS = int(os.environ.get('UPLOAD_RETENTION_DAYS', 1))  # Keep uploaded files for 1 day
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -84,6 +91,10 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 # Global storage for processing jobs
 processing_jobs: Dict[str, 'ProcessingJob'] = {}
 job_lock = threading.Lock()
+
+# Cleanup thread
+cleanup_thread: Optional[threading.Thread] = None
+cleanup_running = False
 
 # Ensure directories exist
 Path(app.config['UPLOAD_FOLDER']).mkdir(exist_ok=True)
@@ -1159,6 +1170,153 @@ def cleanup_stale_jobs():
         return jsonify({'error': 'Failed to cleanup stale jobs'}), 500
 
 
+def cleanup_old_jobs_and_files():
+    """Automatically clean up old jobs and files based on retention policy."""
+    global cleanup_running
+    
+    if cleanup_running:
+        return
+    
+    cleanup_running = True
+    try:
+        logger.info("Starting automatic cleanup of old jobs and files...")
+        
+        now = datetime.now()
+        job_retention = timedelta(days=Config.JOB_RETENTION_DAYS)
+        failed_job_retention = timedelta(days=Config.FAILED_JOB_RETENTION_DAYS)
+        upload_retention = timedelta(days=Config.UPLOAD_RETENTION_DAYS)
+        
+        cleaned_jobs = 0
+        cleaned_files = 0
+        freed_space = 0
+        
+        # Clean up old jobs from memory
+        with job_lock:
+            jobs_to_remove = []
+            for job_id, job in list(processing_jobs.items()):
+                if job.status in ['completed', 'failed', 'cancelled']:
+                    age = now - job.created_at
+                    retention = failed_job_retention if job.status == 'failed' else job_retention
+                    
+                    if age > retention:
+                        jobs_to_remove.append(job_id)
+                        job.cleanup()
+                        cleaned_jobs += 1
+                        logger.info(f"Cleaned up old {job.status} job {job_id} (age: {age.days} days)")
+            
+            for job_id in jobs_to_remove:
+                if job_id in processing_jobs:
+                    del processing_jobs[job_id]
+        
+        # Clean up old output directories
+        output_dir = Path(app.config['OUTPUT_FOLDER'])
+        if output_dir.exists():
+            for job_dir in output_dir.iterdir():
+                if not job_dir.is_dir():
+                    continue
+                
+                try:
+                    # Check if directory is old enough to delete
+                    mtime = datetime.fromtimestamp(job_dir.stat().st_mtime)
+                    age = now - mtime
+                    
+                    # Determine retention based on job status
+                    job_id = job_dir.name
+                    retention = failed_job_retention
+                    
+                    # Check if job exists in memory to determine status
+                    with job_lock:
+                        if job_id in processing_jobs:
+                            job = processing_jobs[job_id]
+                            if job.status == 'completed':
+                                retention = job_retention
+                            elif job.status == 'failed':
+                                retention = failed_job_retention
+                        else:
+                            # Job not in memory, assume completed if old enough
+                            retention = job_retention
+                    
+                    if age > retention:
+                        # Calculate size before deletion
+                        try:
+                            size = sum(f.stat().st_size for f in job_dir.rglob('*') if f.is_file())
+                            freed_space += size
+                        except:
+                            pass
+                        
+                        shutil.rmtree(job_dir, ignore_errors=True)
+                        cleaned_files += 1
+                        logger.info(f"Deleted old output directory: {job_dir} (age: {age.days} days)")
+                except Exception as e:
+                    logger.warning(f"Error cleaning up output directory {job_dir}: {e}")
+        
+        # Clean up old uploaded files
+        upload_dir = Path(app.config['UPLOAD_FOLDER'])
+        if upload_dir.exists():
+            for file_path in upload_dir.iterdir():
+                if not file_path.is_file():
+                    continue
+                
+                try:
+                    mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                    age = now - mtime
+                    
+                    if age > upload_retention:
+                        try:
+                            size = file_path.stat().st_size
+                            freed_space += size
+                        except:
+                            pass
+                        
+                        file_path.unlink()
+                        cleaned_files += 1
+                        logger.info(f"Deleted old uploaded file: {file_path} (age: {age.days} days)")
+                except Exception as e:
+                    logger.warning(f"Error cleaning up uploaded file {file_path}: {e}")
+        
+        freed_space_mb = freed_space / (1024 * 1024)
+        logger.info(
+            f"Cleanup completed: {cleaned_jobs} jobs, {cleaned_files} files/dirs, "
+            f"{freed_space_mb:.2f} MB freed"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in automatic cleanup: {e}", exc_info=True)
+    finally:
+        cleanup_running = False
+
+
+def start_cleanup_thread():
+    """Start background thread for automatic cleanup."""
+    global cleanup_thread
+    
+    def cleanup_loop():
+        while True:
+            try:
+                time.sleep(Config.CLEANUP_INTERVAL)
+                cleanup_old_jobs_and_files()
+            except Exception as e:
+                logger.error(f"Error in cleanup thread: {e}", exc_info=True)
+                time.sleep(60)  # Wait a minute before retrying
+    
+    if cleanup_thread is None or not cleanup_thread.is_alive():
+        cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True, name="CleanupThread")
+        cleanup_thread.start()
+        logger.info(f"Started automatic cleanup thread (interval: {Config.CLEANUP_INTERVAL}s)")
+
+
+@app.route('/cleanup-old', methods=['POST'])
+@require_auth(Permission.MANAGE_USERS)
+def manual_cleanup_old():
+    """Manually trigger cleanup of old jobs and files."""
+    try:
+        cleanup_old_jobs_and_files()
+        return jsonify({'message': 'Cleanup completed successfully'})
+    except Exception as e:
+        logger.error(f"Error in manual cleanup: {e}", exc_info=True)
+        return jsonify({'error': 'Cleanup failed'}), 500
+
+
 # Health Check Endpoints
 @app.route('/health')
 def health_check():
@@ -1649,11 +1807,20 @@ def internal_error(e):
 
 
 if __name__ == '__main__':
+    # Initialize start time for uptime tracking
+    app.config['start_time'] = time.time()
+    
     logger.info("Starting Video Documentation Builder Web Interface...")
     logger.info(f"Configuration: DEBUG={Config.DEBUG}, HOST={Config.HOST}, PORT={Config.PORT}")
     logger.info(f"Max file size: {Config.MAX_CONTENT_LENGTH / (1024**3):.1f}GB")
     logger.info(f"Max concurrent jobs: {Config.MAX_CONCURRENT_JOBS}")
     logger.info(f"Job timeout: {Config.JOB_TIMEOUT}s")
+    logger.info(f"Cleanup interval: {Config.CLEANUP_INTERVAL}s")
+    logger.info(f"Job retention: {Config.JOB_RETENTION_DAYS} days (completed), {Config.FAILED_JOB_RETENTION_DAYS} days (failed)")
+    logger.info(f"Upload retention: {Config.UPLOAD_RETENTION_DAYS} days")
+    
+    # Start automatic cleanup thread
+    start_cleanup_thread()
     
     print("\n" + "="*80)
     print("🚀 VIDEO PROCESSING SYSTEM STARTED SUCCESSFULLY!")
