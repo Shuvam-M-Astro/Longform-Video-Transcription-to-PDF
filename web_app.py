@@ -20,6 +20,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 from datetime import datetime, timedelta
+from dataclasses import asdict
 import uuid
 import re
 from urllib.parse import urlparse
@@ -1492,6 +1493,16 @@ def security_summary():
         logger.error(f"Failed to get security summary: {str(e)}")
         return jsonify({"error": "Failed to get security summary"}), 500
 
+def serialize_profile(profile) -> Dict[str, Any]:
+    """Serialize user profile dataclass to JSON-serializable dict."""
+    profile_dict = asdict(profile)
+    # Convert datetime objects to ISO format strings
+    for key, value in profile_dict.items():
+        if isinstance(value, datetime):
+            profile_dict[key] = value.isoformat()
+    return profile_dict
+
+
 @app.route('/api/user/profile')
 @require_auth()
 def get_user_profile():
@@ -1500,7 +1511,7 @@ def get_user_profile():
         user_session = get_current_user_session()
         profile = user_manager.get_user_profile(user_session.user_id)
         if profile:
-            return jsonify(asdict(profile))
+            return jsonify(serialize_profile(profile))
         else:
             return jsonify({"error": "Profile not found"}), 404
     except Exception as e:
