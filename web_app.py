@@ -1609,7 +1609,7 @@ def get_user_statistics():
 @app.route('/api/search', methods=['POST'])
 @require_auth(Permission.VIEW_JOB)
 def search_transcripts():
-    """Perform cross-language semantic search across transcripts."""
+    """Perform cross-language search across transcripts with multiple modes."""
     try:
         from src.video_doc.search import get_search_service
         
@@ -1625,6 +1625,12 @@ def search_transcripts():
         job_ids = data.get('job_ids')  # Optional: filter by specific jobs
         limit = int(data.get('limit', 10))
         min_score = float(data.get('min_score', 0.5))
+        search_mode = data.get('search_mode', 'semantic')  # 'semantic', 'keyword', or 'hybrid'
+        
+        # Validate search mode
+        valid_modes = ['semantic', 'keyword', 'hybrid']
+        if search_mode not in valid_modes:
+            return jsonify({'error': f'Invalid search_mode. Must be one of: {", ".join(valid_modes)}'}), 400
         
         search_service = get_search_service()
         results = search_service.search(
@@ -1632,12 +1638,14 @@ def search_transcripts():
             target_language=target_language,
             job_ids=job_ids,
             limit=limit,
-            min_score=min_score
+            min_score=min_score,
+            search_mode=search_mode
         )
         
         return jsonify({
             'query': query,
             'target_language': target_language,
+            'search_mode': search_mode,
             'results': results,
             'count': len(results)
         })

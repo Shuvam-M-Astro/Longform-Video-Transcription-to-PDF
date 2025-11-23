@@ -11,6 +11,7 @@ This module provides:
 import os
 import json
 import hashlib
+import re
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -332,7 +333,144 @@ class SearchService:
         self.translation_service = get_translation_service()
         self.embedding_service = get_embedding_service()
     
+    def _calculate_keyword_score(self, query: str, text: str) -> float:
+        """
+        Calculate keyword matching score between query and text.
+        
+        Args:
+            query: Search query
+            text: Text to match against
+            
+        Returns:
+            Score between 0 and 1
+        """
+        if not query or not text:
+            return 0.0
+        
+        query_lower = query.lower()
+        text_lower = text.lower()
+        
+        # Extract words from query
+        query_words = set(re.findall(r'\b\w+\b', query_lower))
+        if not query_words:
+            return 0.0
+        
+        # Count matches
+        text_words = set(re.findall(r'\b\w+\b', text_lower))
+        matched_words = query_words & text_words
+        
+        # Calculate score based on:
+        # 1. Ratio of matched words to query words
+        # 2. Exact phrase matches (bonus)
+        word_match_ratio = len(matched_words) / len(query_words) if query_words else 0.0
+        
+        # Check for exact phrase match (case-insensitive)
+        phrase_bonus = 0.0
+        if query_lower in text_lower:
+            phrase_bonus = 0.3  # Bonus for exact phrase
+        
+        # Combine scores (max 1.0)
+        score = min(1.0, word_match_ratio * 0.7 + phrase_bonus)
+        return score
+    
+    def _search_keywords(
+        self,
+        query: str,
+        job_ids: Optional[List[str]] = None,
+        limit: int = 10,
+        min_score: float = 0.1
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform keyword-based text search.
+        
+        Args:
+            query: Search query
+            job_ids: Filter by specific job IDs
+            limit: Maximum number of results
+            min_score: Minimum keyword score (0-1)
+            
+        Returns:
+            List of search results with chunks and metadata
+        """
+        try:
+            db = get_db_session()
+            try:
+                # Build query
+                chunk_query = db.query(TranscriptChunk)
+                
+                if job_ids:
+                    chunk_query = chunk_query.filter(
+                        TranscriptChunk.job_id.in_([uuid.UUID(jid) for jid in job_ids])
+                    )
+                
+                # Get all chunks
+                chunks = chunk_query.all()
+                
+                if not chunks:
+                    return []
+                
+                # Calculate keyword scores
+                results = []
+                for chunk in chunks:
+                    keyword_score = self._calculate_keyword_score(query, chunk.text)
+                    
+                    if keyword_score >= min_score:
+                        results.append({
+                            'chunk_id': str(chunk.id),
+                            'job_id': str(chunk.job_id),
+                            'text': chunk.text,
+                            'original_text': chunk.text,
+                            'original_language': chunk.original_language,
+                            'start_time': chunk.start_time,
+                            'end_time': chunk.end_time,
+                            'similarity': float(keyword_score),
+                            'keyword_score': float(keyword_score),
+                            'semantic_score': 0.0,
+                            'chunk_index': chunk.chunk_index,
+                            'metadata': chunk.metadata or {}
+                        })
+                
+                # Sort by keyword score and limit
+                results.sort(key=lambda x: x['keyword_score'], reverse=True)
+                return results[:limit]
+            finally:
+                db.close()
+                
+        except Exception as e:
+            self.logger.error(f"Keyword search error: {e}")
+            return []
+    
     def search(
+        self,
+        query: str,
+        target_language: Optional[str] = None,
+        job_ids: Optional[List[str]] = None,
+        limit: int = 10,
+        min_score: float = 0.5,
+        search_mode: str = 'semantic'  # 'semantic', 'keyword', or 'hybrid'
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform cross-language search with multiple modes.
+        
+        Args:
+            query: Search query in any language
+            target_language: Language to return results in (None = original)
+            job_ids: Filter by specific job IDs
+            limit: Maximum number of results
+            min_score: Minimum similarity score (0-1)
+            search_mode: 'semantic', 'keyword', or 'hybrid'
+            
+        Returns:
+            List of search results with chunks and metadata
+        """
+        if search_mode == 'keyword':
+            return self._search_keywords(query, job_ids, limit, min_score)
+        elif search_mode == 'hybrid':
+            return self._search_hybrid(query, target_language, job_ids, limit, min_score)
+        else:  # semantic (default)
+            return self._search_semantic(query, target_language, job_ids, limit, min_score)
+    
+    def _search_semantic(
         self,
         query: str,
         target_language: Optional[str] = None,
@@ -341,7 +479,7 @@ class SearchService:
         min_score: float = 0.5
     ) -> List[Dict[str, Any]]:
         """
-        Perform cross-language semantic search.
+        Perform semantic search using vector embeddings.
         
         Args:
             query: Search query in any language
@@ -356,7 +494,6 @@ class SearchService:
         try:
             # Generate query embedding
             query_embedding = self.embedding_service.embed_query(query)
-            query_embedding_list = query_embedding.tolist()
             
             # Perform vector search in database
             db = get_db_session()
@@ -410,6 +547,8 @@ class SearchService:
                             'start_time': chunk.start_time,
                             'end_time': chunk.end_time,
                             'similarity': float(similarity),
+                            'semantic_score': float(similarity),
+                            'keyword_score': 0.0,
                             'chunk_index': chunk.chunk_index,
                             'metadata': chunk.metadata or {}
                         })
@@ -421,7 +560,107 @@ class SearchService:
                 db.close()
                 
         except Exception as e:
-            self.logger.error(f"Search error: {e}")
+            self.logger.error(f"Semantic search error: {e}")
+            return []
+    
+    def _search_hybrid(
+        self,
+        query: str,
+        target_language: Optional[str] = None,
+        job_ids: Optional[List[str]] = None,
+        limit: int = 10,
+        min_score: float = 0.5,
+        semantic_weight: float = 0.6,
+        keyword_weight: float = 0.4
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform hybrid search combining semantic and keyword matching.
+        
+        Args:
+            query: Search query in any language
+            target_language: Language to return results in (None = original)
+            job_ids: Filter by specific job IDs
+            limit: Maximum number of results
+            min_score: Minimum combined score (0-1)
+            semantic_weight: Weight for semantic score (0-1)
+            keyword_weight: Weight for keyword score (0-1)
+            
+        Returns:
+            List of search results with chunks and metadata
+        """
+        try:
+            # Normalize weights
+            total_weight = semantic_weight + keyword_weight
+            if total_weight > 0:
+                semantic_weight /= total_weight
+                keyword_weight /= total_weight
+            else:
+                semantic_weight = 0.5
+                keyword_weight = 0.5
+            
+            # Get semantic results
+            semantic_results = self._search_semantic(
+                query, target_language, job_ids, limit * 2, min_score * 0.5
+            )
+            
+            # Get keyword results
+            keyword_results = self._search_keywords(
+                query, job_ids, limit * 2, min_score * 0.5
+            )
+            
+            # Combine results by chunk_id
+            combined_results: Dict[str, Dict[str, Any]] = {}
+            
+            # Add semantic results
+            for result in semantic_results:
+                chunk_id = result['chunk_id']
+                result['semantic_score'] = result.get('similarity', 0.0)
+                result['keyword_score'] = 0.0
+                combined_results[chunk_id] = result
+            
+            # Merge keyword results
+            for result in keyword_results:
+                chunk_id = result['chunk_id']
+                if chunk_id in combined_results:
+                    # Update existing result with keyword score
+                    combined_results[chunk_id]['keyword_score'] = result.get('keyword_score', 0.0)
+                else:
+                    # Add new result
+                    result['semantic_score'] = 0.0
+                    combined_results[chunk_id] = result
+            
+            # Calculate combined scores
+            final_results = []
+            for result in combined_results.values():
+                semantic_score = result.get('semantic_score', 0.0)
+                keyword_score = result.get('keyword_score', 0.0)
+                
+                # Combine scores
+                combined_score = (semantic_score * semantic_weight) + (keyword_score * keyword_weight)
+                
+                if combined_score >= min_score:
+                    result['similarity'] = combined_score
+                    result['combined_score'] = combined_score
+                    
+                    # Translate text if needed
+                    if target_language and target_language != result.get('original_language'):
+                        try:
+                            result['text'] = self.translation_service.translate(
+                                result['original_text'],
+                                target_language=target_language,
+                                source_language=result.get('original_language') or 'auto'
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"Translation failed: {e}")
+                    
+                    final_results.append(result)
+            
+            # Sort by combined score and limit
+            final_results.sort(key=lambda x: x['combined_score'], reverse=True)
+            return final_results[:limit]
+            
+        except Exception as e:
+            self.logger.error(f"Hybrid search error: {e}")
             return []
     
     def index_transcript(

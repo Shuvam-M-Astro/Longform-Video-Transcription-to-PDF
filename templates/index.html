@@ -229,6 +229,21 @@
                                 <div class="form-text">Search across all indexed transcripts</div>
                             </div>
                             <div class="mb-3">
+                                <label for="searchMode" class="form-label">Search Mode</label>
+                                <select class="form-select" id="searchMode">
+                                    <option value="hybrid" selected>Hybrid (Recommended)</option>
+                                    <option value="semantic">Semantic Only</option>
+                                    <option value="keyword">Keyword Only</option>
+                                </select>
+                                <div class="form-text">
+                                    <small>
+                                        <strong>Hybrid:</strong> Combines semantic and keyword search<br>
+                                        <strong>Semantic:</strong> Understands meaning and context<br>
+                                        <strong>Keyword:</strong> Exact word/phrase matching
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="mb-3">
                                 <label for="searchTargetLanguage" class="form-label">Result Language (optional)</label>
                                 <select class="form-select" id="searchTargetLanguage">
                                     <option value="">Original language</option>

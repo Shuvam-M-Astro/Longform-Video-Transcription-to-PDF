@@ -531,6 +531,7 @@ class VideoProcessor {
     async handleSearch() {
         const queryInput = document.getElementById('searchQuery');
         const targetLanguageSelect = document.getElementById('searchTargetLanguage');
+        const searchModeSelect = document.getElementById('searchMode');
         
         const query = queryInput.value.trim();
         if (!query) {
@@ -539,6 +540,7 @@ class VideoProcessor {
         }
 
         const targetLanguage = targetLanguageSelect.value || null;
+        const searchMode = searchModeSelect ? searchModeSelect.value : 'hybrid';
 
         try {
             // Show loading state
@@ -555,6 +557,7 @@ class VideoProcessor {
                 body: JSON.stringify({
                     query: query,
                     target_language: targetLanguage,
+                    search_mode: searchMode,
                     limit: 20,
                     min_score: 0.3
                 })
@@ -598,6 +601,14 @@ class VideoProcessor {
             const similarityPercent = Math.round(result.similarity * 100);
             const timeStr = this.formatTime(result.start_time);
             
+            // Show score breakdown for hybrid mode
+            let scoreInfo = `${similarityPercent}% match`;
+            if (data.search_mode === 'hybrid' && result.semantic_score !== undefined && result.keyword_score !== undefined) {
+                const semanticPercent = Math.round(result.semantic_score * 100);
+                const keywordPercent = Math.round(result.keyword_score * 100);
+                scoreInfo = `${similarityPercent}% (S:${semanticPercent}% K:${keywordPercent}%)`;
+            }
+            
             // Show translation indicator if result was translated
             const translationIndicator = result.original_language !== (data.target_language || result.original_language)
                 ? '<span class="badge bg-info ms-2" title="Translated from ' + result.original_language + '">Translated</span>'
@@ -607,7 +618,7 @@ class VideoProcessor {
                 <div class="list-group-item">
                     <div class="d-flex justify-content-between align-items-start mb-2">
                         <small class="text-muted">#${index + 1} • ${timeStr}</small>
-                        <span class="badge bg-success">${similarityPercent}% match</span>
+                        <span class="badge bg-success" title="Combined score${data.search_mode === 'hybrid' ? ' (Semantic + Keyword)' : ''}">${scoreInfo}</span>
                     </div>
                     <p class="mb-2">${this.highlightQuery(result.text, data.query)}</p>
                     <div class="d-flex justify-content-between align-items-center">
