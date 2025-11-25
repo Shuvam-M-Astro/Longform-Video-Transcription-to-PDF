@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import shutil
+import threading
+import uuid
 from pathlib import Path
 
 from src.video_doc.download import download_video
@@ -466,6 +468,38 @@ def main() -> None:
         )
         progress.end_step()
         print(f"Report ready: {report_pdf_path}", flush=True)
+
+    # Automatically index transcript for search (async, non-blocking)
+    def index_transcript_in_background():
+        """Index transcript in background thread."""
+        try:
+            from src.video_doc.search import get_search_service
+            
+            # Generate a stable job_id based on output directory
+            # Use UUID5 with NAMESPACE_URL to ensure consistency for same output path
+            output_path_str = str(output_dir.absolute())
+            job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, output_path_str))
+            
+            search_service = get_search_service()
+            success = search_service.index_transcript(
+                job_id=job_id,
+                segments_json_path=segments_json
+            )
+            if success:
+                print(f"✓ Transcript indexed for search (job_id: {job_id[:8]}...)", flush=True)
+            else:
+                print("⚠ Failed to index transcript for search", flush=True)
+        except ImportError:
+            # Search dependencies not available, skip indexing
+            pass
+        except Exception as e:
+            # Don't fail the main process if indexing fails
+            print(f"⚠ Could not index transcript for search: {e}", flush=True)
+    
+    # Start indexing in background thread
+    index_thread = threading.Thread(target=index_transcript_in_background, daemon=True)
+    index_thread.start()
+    print("→ Started background indexing for search...", flush=True)
 
     print(json.dumps({
         "audio": str(audio_path),
