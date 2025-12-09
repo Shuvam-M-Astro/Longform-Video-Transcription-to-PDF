@@ -1632,6 +1632,27 @@ def search_transcripts():
         if search_mode not in valid_modes:
             return jsonify({'error': f'Invalid search_mode. Must be one of: {", ".join(valid_modes)}'}), 400
         
+        # Get hybrid search weights (optional, only used in hybrid mode)
+        semantic_weight = data.get('semantic_weight')
+        keyword_weight = data.get('keyword_weight')
+        
+        # Validate weights if provided
+        if semantic_weight is not None:
+            try:
+                semantic_weight = float(semantic_weight)
+                if not (0.0 <= semantic_weight <= 1.0):
+                    return jsonify({'error': 'semantic_weight must be between 0.0 and 1.0'}), 400
+            except (ValueError, TypeError):
+                return jsonify({'error': 'semantic_weight must be a number'}), 400
+        
+        if keyword_weight is not None:
+            try:
+                keyword_weight = float(keyword_weight)
+                if not (0.0 <= keyword_weight <= 1.0):
+                    return jsonify({'error': 'keyword_weight must be between 0.0 and 1.0'}), 400
+            except (ValueError, TypeError):
+                return jsonify({'error': 'keyword_weight must be a number'}), 400
+        
         search_service = get_search_service()
         results = search_service.search(
             query=query,
@@ -1639,16 +1660,25 @@ def search_transcripts():
             job_ids=job_ids,
             limit=limit,
             min_score=min_score,
-            search_mode=search_mode
+            search_mode=search_mode,
+            semantic_weight=semantic_weight,
+            keyword_weight=keyword_weight
         )
         
-        return jsonify({
+        response_data = {
             'query': query,
             'target_language': target_language,
             'search_mode': search_mode,
             'results': results,
             'count': len(results)
-        })
+        }
+        
+        # Include weights in response if hybrid mode was used
+        if search_mode == 'hybrid':
+            response_data['semantic_weight'] = semantic_weight if semantic_weight is not None else 0.6
+            response_data['keyword_weight'] = keyword_weight if keyword_weight is not None else 0.4
+        
+        return jsonify(response_data)
         
     except Exception as e:
         logger.error(f"Search error: {e}", exc_info=True)

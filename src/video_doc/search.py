@@ -447,7 +447,9 @@ class SearchService:
         job_ids: Optional[List[str]] = None,
         limit: int = 10,
         min_score: float = 0.5,
-        search_mode: str = 'semantic'  # 'semantic', 'keyword', or 'hybrid'
+        search_mode: str = 'semantic',  # 'semantic', 'keyword', or 'hybrid'
+        semantic_weight: Optional[float] = None,
+        keyword_weight: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         Perform cross-language search with multiple modes.
@@ -459,6 +461,8 @@ class SearchService:
             limit: Maximum number of results
             min_score: Minimum similarity score (0-1)
             search_mode: 'semantic', 'keyword', or 'hybrid'
+            semantic_weight: Weight for semantic score in hybrid mode (0-1, default: 0.6)
+            keyword_weight: Weight for keyword score in hybrid mode (0-1, default: 0.4)
             
         Returns:
             List of search results with chunks and metadata
@@ -466,7 +470,10 @@ class SearchService:
         if search_mode == 'keyword':
             return self._search_keywords(query, job_ids, limit, min_score)
         elif search_mode == 'hybrid':
-            return self._search_hybrid(query, target_language, job_ids, limit, min_score)
+            # Use provided weights or defaults
+            sem_weight = semantic_weight if semantic_weight is not None else 0.6
+            kw_weight = keyword_weight if keyword_weight is not None else 0.4
+            return self._search_hybrid(query, target_language, job_ids, limit, min_score, sem_weight, kw_weight)
         else:  # semantic (default)
             return self._search_semantic(query, target_language, job_ids, limit, min_score)
     

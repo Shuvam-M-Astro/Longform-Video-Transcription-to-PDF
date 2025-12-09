@@ -230,7 +230,7 @@
                             </div>
                             <div class="mb-3">
                                 <label for="searchMode" class="form-label">Search Mode</label>
-                                <select class="form-select" id="searchMode">
+                                <select class="form-select" id="searchMode" onchange="toggleHybridWeights()">
                                     <option value="hybrid" selected>Hybrid (Recommended)</option>
                                     <option value="semantic">Semantic Only</option>
                                     <option value="keyword">Keyword Only</option>
@@ -241,6 +241,22 @@
                                         <strong>Semantic:</strong> Understands meaning and context<br>
                                         <strong>Keyword:</strong> Exact word/phrase matching
                                     </small>
+                                </div>
+                            </div>
+                            <div class="mb-3" id="hybridWeightsContainer" style="display: block;">
+                                <label class="form-label">Hybrid Search Weights</label>
+                                <div class="row g-2">
+                                    <div class="col-6">
+                                        <label for="semanticWeight" class="form-label small">Semantic: <span id="semanticWeightValue">60</span>%</label>
+                                        <input type="range" class="form-range" id="semanticWeight" min="0" max="100" value="60" oninput="updateWeightDisplay()">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="keywordWeight" class="form-label small">Keyword: <span id="keywordWeightValue">40</span>%</label>
+                                        <input type="range" class="form-range" id="keywordWeight" min="0" max="100" value="40" oninput="updateWeightDisplay()">
+                                    </div>
+                                </div>
+                                <div class="form-text">
+                                    <small>Adjust the balance between semantic understanding and keyword matching</small>
                                 </div>
                             </div>
                             <div class="mb-3">
@@ -340,6 +356,32 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script>
+        // Toggle hybrid weights visibility based on search mode
+        function toggleHybridWeights() {
+            const searchMode = document.getElementById('searchMode').value;
+            const weightsContainer = document.getElementById('hybridWeightsContainer');
+            if (searchMode === 'hybrid') {
+                weightsContainer.style.display = 'block';
+            } else {
+                weightsContainer.style.display = 'none';
+            }
+        }
+        
+        // Update weight display values
+        function updateWeightDisplay() {
+            const semanticWeight = document.getElementById('semanticWeight').value;
+            const keywordWeight = document.getElementById('keywordWeight').value;
+            document.getElementById('semanticWeightValue').textContent = semanticWeight;
+            document.getElementById('keywordWeightValue').textContent = keywordWeight;
+        }
+        
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            toggleHybridWeights();
+            updateWeightDisplay();
+        });
+    </script>
 </body>
 </html>
 

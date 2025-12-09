@@ -542,6 +542,19 @@ class VideoProcessor {
         const targetLanguage = targetLanguageSelect.value || null;
         const searchMode = searchModeSelect ? searchModeSelect.value : 'hybrid';
 
+        // Get hybrid search weights if in hybrid mode
+        let semanticWeight = null;
+        let keywordWeight = null;
+        if (searchMode === 'hybrid') {
+            const semanticWeightInput = document.getElementById('semanticWeight');
+            const keywordWeightInput = document.getElementById('keywordWeight');
+            if (semanticWeightInput && keywordWeightInput) {
+                // Convert percentage to decimal (0-1)
+                semanticWeight = parseFloat(semanticWeightInput.value) / 100;
+                keywordWeight = parseFloat(keywordWeightInput.value) / 100;
+            }
+        }
+
         try {
             // Show loading state
             const searchButton = document.querySelector('#searchForm button[type="submit"]');
@@ -549,18 +562,26 @@ class VideoProcessor {
             searchButton.disabled = true;
             searchButton.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Searching...';
 
+            const requestBody = {
+                query: query,
+                target_language: targetLanguage,
+                search_mode: searchMode,
+                limit: 20,
+                min_score: 0.3
+            };
+            
+            // Add weights only if in hybrid mode and weights are provided
+            if (searchMode === 'hybrid' && semanticWeight !== null && keywordWeight !== null) {
+                requestBody.semantic_weight = semanticWeight;
+                requestBody.keyword_weight = keywordWeight;
+            }
+
             const response = await fetch('/api/search', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({
-                    query: query,
-                    target_language: targetLanguage,
-                    search_mode: searchMode,
-                    limit: 20,
-                    min_score: 0.3
-                })
+                body: JSON.stringify(requestBody)
             });
 
             const data = await response.json();
