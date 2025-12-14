@@ -555,6 +555,13 @@ class VideoProcessor {
             }
         }
 
+        // Get advanced filter values
+        const dateFromInput = document.getElementById('filterDateFrom');
+        const dateToInput = document.getElementById('filterDateTo');
+        const jobTypeInput = document.getElementById('filterJobType');
+        const jobStatusInput = document.getElementById('filterJobStatus');
+        const originalLanguageInput = document.getElementById('filterOriginalLanguage');
+
         try {
             // Show loading state
             const searchButton = document.querySelector('#searchForm button[type="submit"]');
@@ -574,6 +581,23 @@ class VideoProcessor {
             if (searchMode === 'hybrid' && semanticWeight !== null && keywordWeight !== null) {
                 requestBody.semantic_weight = semanticWeight;
                 requestBody.keyword_weight = keywordWeight;
+            }
+            
+            // Add advanced filters if provided
+            if (dateFromInput && dateFromInput.value) {
+                requestBody.date_from = dateFromInput.value + 'T00:00:00';
+            }
+            if (dateToInput && dateToInput.value) {
+                requestBody.date_to = dateToInput.value + 'T23:59:59';
+            }
+            if (jobTypeInput && jobTypeInput.value) {
+                requestBody.job_type = jobTypeInput.value;
+            }
+            if (jobStatusInput && jobStatusInput.value) {
+                requestBody.job_status = jobStatusInput.value;
+            }
+            if (originalLanguageInput && originalLanguageInput.value) {
+                requestBody.original_language = originalLanguageInput.value;
             }
 
             const response = await fetch('/api/search', {

@@ -13,17 +13,17 @@ import json
 import hashlib
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 import numpy as np
 
-from sqlalchemy import Column, String, Text, DateTime, Float, Integer, ForeignKey, Index, ARRAY
+from sqlalchemy import Column, String, Text, DateTime, Float, Integer, ForeignKey, Index, ARRAY, and_, or_
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import uuid
 
-from .database import Base, get_db_session
+from .database import Base, get_db_session, ProcessingJob
 from .monitoring import get_logger
 
 logger = get_logger(__name__)
@@ -333,6 +333,81 @@ class SearchService:
         self.translation_service = get_translation_service()
         self.embedding_service = get_embedding_service()
     
+    def _apply_advanced_filters(
+        self,
+        chunk_query,
+        job_ids: Optional[List[str]] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        job_type: Optional[str] = None,
+        job_status: Optional[str] = None,
+        original_language: Optional[str] = None
+    ):
+        """
+        Apply advanced filters to chunk query.
+        
+        Args:
+            chunk_query: SQLAlchemy query for TranscriptChunk
+            job_ids: Filter by specific job IDs
+            date_from: Filter jobs created/indexed after this date
+            date_to: Filter jobs created/indexed before this date
+            job_type: Filter by job type ('url' or 'file')
+            job_status: Filter by job status ('completed', 'failed', etc.)
+            original_language: Filter by transcript language code
+            
+        Returns:
+            Filtered query
+        """
+        # Track if we've joined with ProcessingJob
+        needs_join = False
+        
+        # Filter by job IDs
+        if job_ids:
+            chunk_query = chunk_query.filter(
+                TranscriptChunk.job_id.in_([uuid.UUID(jid) for jid in job_ids])
+            )
+        
+        # Filter by original language
+        if original_language:
+            chunk_query = chunk_query.filter(
+                TranscriptChunk.original_language == original_language
+            )
+        
+        # Check if we need to join with ProcessingJob
+        if date_from or date_to or job_type or job_status:
+            needs_join = True
+        
+        # Join with ProcessingJob if needed
+        if needs_join:
+            chunk_query = chunk_query.join(
+                ProcessingJob, TranscriptChunk.job_id == ProcessingJob.id
+            )
+            
+            # Filter by date range (using job creation date)
+            if date_from:
+                chunk_query = chunk_query.filter(
+                    ProcessingJob.created_at >= date_from
+                )
+            if date_to:
+                # Include the entire day
+                if isinstance(date_to, datetime):
+                    date_to_end = datetime.combine(date_to.date(), datetime.max.time())
+                else:
+                    date_to_end = datetime.combine(date_to, datetime.max.time())
+                chunk_query = chunk_query.filter(
+                    ProcessingJob.created_at <= date_to_end
+                )
+            
+            # Filter by job type
+            if job_type:
+                chunk_query = chunk_query.filter(ProcessingJob.job_type == job_type)
+            
+            # Filter by job status
+            if job_status:
+                chunk_query = chunk_query.filter(ProcessingJob.status == job_status)
+        
+        return chunk_query
+    
     def _calculate_keyword_score(self, query: str, text: str) -> float:
         """
         Calculate keyword matching score between query and text.
@@ -378,16 +453,26 @@ class SearchService:
         query: str,
         job_ids: Optional[List[str]] = None,
         limit: int = 10,
-        min_score: float = 0.1
+        min_score: float = 0.1,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        job_type: Optional[str] = None,
+        job_status: Optional[str] = None,
+        original_language: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Perform keyword-based text search.
+        Perform keyword-based text search with advanced filtering.
         
         Args:
             query: Search query
             job_ids: Filter by specific job IDs
             limit: Maximum number of results
             min_score: Minimum keyword score (0-1)
+            date_from: Filter jobs created after this date
+            date_to: Filter jobs created before this date
+            job_type: Filter by job type ('url' or 'file')
+            job_status: Filter by job status ('completed', 'failed', etc.)
+            original_language: Filter by transcript language code
             
         Returns:
             List of search results with chunks and metadata
@@ -398,10 +483,11 @@ class SearchService:
                 # Build query
                 chunk_query = db.query(TranscriptChunk)
                 
-                if job_ids:
-                    chunk_query = chunk_query.filter(
-                        TranscriptChunk.job_id.in_([uuid.UUID(jid) for jid in job_ids])
-                    )
+                # Apply advanced filters
+                chunk_query = self._apply_advanced_filters(
+                    chunk_query, job_ids, date_from, date_to,
+                    job_type, job_status, original_language
+                )
                 
                 # Get all chunks
                 chunks = chunk_query.all()
@@ -449,10 +535,15 @@ class SearchService:
         min_score: float = 0.5,
         search_mode: str = 'semantic',  # 'semantic', 'keyword', or 'hybrid'
         semantic_weight: Optional[float] = None,
-        keyword_weight: Optional[float] = None
+        keyword_weight: Optional[float] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        job_type: Optional[str] = None,
+        job_status: Optional[str] = None,
+        original_language: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Perform cross-language search with multiple modes.
+        Perform cross-language search with multiple modes and advanced filtering.
         
         Args:
             query: Search query in any language
@@ -463,19 +554,33 @@ class SearchService:
             search_mode: 'semantic', 'keyword', or 'hybrid'
             semantic_weight: Weight for semantic score in hybrid mode (0-1, default: 0.6)
             keyword_weight: Weight for keyword score in hybrid mode (0-1, default: 0.4)
+            date_from: Filter jobs created after this date
+            date_to: Filter jobs created before this date
+            job_type: Filter by job type ('url' or 'file')
+            job_status: Filter by job status ('completed', 'failed', etc.)
+            original_language: Filter by transcript language code
             
         Returns:
             List of search results with chunks and metadata
         """
         if search_mode == 'keyword':
-            return self._search_keywords(query, job_ids, limit, min_score)
+            return self._search_keywords(
+                query, job_ids, limit, min_score,
+                date_from, date_to, job_type, job_status, original_language
+            )
         elif search_mode == 'hybrid':
             # Use provided weights or defaults
             sem_weight = semantic_weight if semantic_weight is not None else 0.6
             kw_weight = keyword_weight if keyword_weight is not None else 0.4
-            return self._search_hybrid(query, target_language, job_ids, limit, min_score, sem_weight, kw_weight)
+            return self._search_hybrid(
+                query, target_language, job_ids, limit, min_score, sem_weight, kw_weight,
+                date_from, date_to, job_type, job_status, original_language
+            )
         else:  # semantic (default)
-            return self._search_semantic(query, target_language, job_ids, limit, min_score)
+            return self._search_semantic(
+                query, target_language, job_ids, limit, min_score,
+                date_from, date_to, job_type, job_status, original_language
+            )
     
     def _search_semantic(
         self,
@@ -483,10 +588,15 @@ class SearchService:
         target_language: Optional[str] = None,
         job_ids: Optional[List[str]] = None,
         limit: int = 10,
-        min_score: float = 0.5
+        min_score: float = 0.5,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        job_type: Optional[str] = None,
+        job_status: Optional[str] = None,
+        original_language: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Perform semantic search using vector embeddings.
+        Perform semantic search using vector embeddings with advanced filtering.
         
         Args:
             query: Search query in any language
@@ -494,6 +604,11 @@ class SearchService:
             job_ids: Filter by specific job IDs
             limit: Maximum number of results
             min_score: Minimum similarity score (0-1)
+            date_from: Filter jobs created after this date
+            date_to: Filter jobs created before this date
+            job_type: Filter by job type ('url' or 'file')
+            job_status: Filter by job status ('completed', 'failed', etc.)
+            original_language: Filter by transcript language code
             
         Returns:
             List of search results with chunks and metadata
@@ -510,10 +625,11 @@ class SearchService:
                     TranscriptChunk.embedding.isnot(None)
                 )
                 
-                if job_ids:
-                    chunk_query = chunk_query.filter(
-                        TranscriptChunk.job_id.in_([uuid.UUID(jid) for jid in job_ids])
-                    )
+                # Apply advanced filters
+                chunk_query = self._apply_advanced_filters(
+                    chunk_query, job_ids, date_from, date_to,
+                    job_type, job_status, original_language
+                )
                 
                 # Get all matching chunks
                 chunks = chunk_query.all()
@@ -578,10 +694,15 @@ class SearchService:
         limit: int = 10,
         min_score: float = 0.5,
         semantic_weight: float = 0.6,
-        keyword_weight: float = 0.4
+        keyword_weight: float = 0.4,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+        job_type: Optional[str] = None,
+        job_status: Optional[str] = None,
+        original_language: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Perform hybrid search combining semantic and keyword matching.
+        Perform hybrid search combining semantic and keyword matching with advanced filtering.
         
         Args:
             query: Search query in any language
@@ -591,6 +712,11 @@ class SearchService:
             min_score: Minimum combined score (0-1)
             semantic_weight: Weight for semantic score (0-1)
             keyword_weight: Weight for keyword score (0-1)
+            date_from: Filter jobs created after this date
+            date_to: Filter jobs created before this date
+            job_type: Filter by job type ('url' or 'file')
+            job_status: Filter by job status ('completed', 'failed', etc.)
+            original_language: Filter by transcript language code
             
         Returns:
             List of search results with chunks and metadata
@@ -605,14 +731,16 @@ class SearchService:
                 semantic_weight = 0.5
                 keyword_weight = 0.5
             
-            # Get semantic results
+            # Get semantic results with filters
             semantic_results = self._search_semantic(
-                query, target_language, job_ids, limit * 2, min_score * 0.5
+                query, target_language, job_ids, limit * 2, min_score * 0.5,
+                date_from, date_to, job_type, job_status, original_language
             )
             
-            # Get keyword results
+            # Get keyword results with filters
             keyword_results = self._search_keywords(
-                query, job_ids, limit * 2, min_score * 0.5
+                query, job_ids, limit * 2, min_score * 0.5,
+                date_from, date_to, job_type, job_status, original_language
             )
             
             # Combine results by chunk_id

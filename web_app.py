@@ -1653,6 +1653,36 @@ def search_transcripts():
             except (ValueError, TypeError):
                 return jsonify({'error': 'keyword_weight must be a number'}), 400
         
+        # Advanced filtering parameters
+        date_from_str = data.get('date_from')
+        date_to_str = data.get('date_to')
+        job_type = data.get('job_type')
+        job_status = data.get('job_status')
+        original_language = data.get('original_language')
+        
+        # Parse date strings to datetime objects
+        date_from = None
+        date_to = None
+        if date_from_str:
+            try:
+                date_from = datetime.fromisoformat(date_from_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                return jsonify({'error': 'Invalid date_from format. Use ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)'}), 400
+        
+        if date_to_str:
+            try:
+                date_to = datetime.fromisoformat(date_to_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                return jsonify({'error': 'Invalid date_to format. Use ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)'}), 400
+        
+        # Validate job_type
+        if job_type and job_type not in ['url', 'file']:
+            return jsonify({'error': 'job_type must be "url" or "file"'}), 400
+        
+        # Validate job_status
+        if job_status and job_status not in ['pending', 'processing', 'completed', 'failed', 'cancelled']:
+            return jsonify({'error': 'Invalid job_status'}), 400
+        
         search_service = get_search_service()
         results = search_service.search(
             query=query,
@@ -1662,7 +1692,12 @@ def search_transcripts():
             min_score=min_score,
             search_mode=search_mode,
             semantic_weight=semantic_weight,
-            keyword_weight=keyword_weight
+            keyword_weight=keyword_weight,
+            date_from=date_from,
+            date_to=date_to,
+            job_type=job_type,
+            job_status=job_status,
+            original_language=original_language
         )
         
         response_data = {

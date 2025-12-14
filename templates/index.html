@@ -276,6 +276,59 @@
                                 </select>
                                 <div class="form-text">Translate results to this language</div>
                             </div>
+                            
+                            <!-- Advanced Filters (Collapsible) -->
+                            <div class="mb-3">
+                                <button type="button" class="btn btn-sm btn-outline-secondary w-100" data-bs-toggle="collapse" data-bs-target="#advancedFilters" aria-expanded="false" aria-controls="advancedFilters">
+                                    <i class="fas fa-filter me-2"></i>Advanced Filters
+                                </button>
+                                <div class="collapse mt-2" id="advancedFilters">
+                                    <div class="card card-body bg-light">
+                                        <div class="mb-2">
+                                            <label for="filterDateFrom" class="form-label small">Date From</label>
+                                            <input type="date" class="form-control form-control-sm" id="filterDateFrom">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label for="filterDateTo" class="form-label small">Date To</label>
+                                            <input type="date" class="form-control form-control-sm" id="filterDateTo">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label for="filterJobType" class="form-label small">Job Type</label>
+                                            <select class="form-select form-select-sm" id="filterJobType">
+                                                <option value="">All types</option>
+                                                <option value="url">URL</option>
+                                                <option value="file">File Upload</option>
+                                            </select>
+                                        </div>
+                                        <div class="mb-2">
+                                            <label for="filterJobStatus" class="form-label small">Job Status</label>
+                                            <select class="form-select form-select-sm" id="filterJobStatus">
+                                                <option value="">All statuses</option>
+                                                <option value="completed">Completed</option>
+                                                <option value="processing">Processing</option>
+                                                <option value="failed">Failed</option>
+                                            </select>
+                                        </div>
+                                        <div class="mb-2">
+                                            <label for="filterOriginalLanguage" class="form-label small">Original Language</label>
+                                            <select class="form-select form-select-sm" id="filterOriginalLanguage">
+                                                <option value="">All languages</option>
+                                                <option value="en">English</option>
+                                                <option value="es">Spanish</option>
+                                                <option value="fr">French</option>
+                                                <option value="de">German</option>
+                                                <option value="it">Italian</option>
+                                                <option value="pt">Portuguese</option>
+                                                <option value="ru">Russian</option>
+                                                <option value="ja">Japanese</option>
+                                                <option value="ko">Korean</option>
+                                                <option value="zh">Chinese</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
                             <button type="submit" class="btn btn-info w-100">
                                 <i class="fas fa-search me-2"></i>Search
                             </button>
