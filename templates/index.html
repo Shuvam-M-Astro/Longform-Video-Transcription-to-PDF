@@ -336,7 +336,17 @@
                         
                         <!-- Search Results -->
                         <div id="searchResults" class="mt-3" style="display: none;">
-                            <h6>Search Results</h6>
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h6 class="mb-0">Search Results</h6>
+                                <div class="btn-group btn-group-sm" role="group">
+                                    <button type="button" class="btn btn-outline-success" id="exportResultsCsv" title="Export as CSV">
+                                        <i class="fas fa-file-csv me-1"></i>CSV
+                                    </button>
+                                    <button type="button" class="btn btn-outline-success" id="exportResultsJson" title="Export as JSON">
+                                        <i class="fas fa-file-code me-1"></i>JSON
+                                    </button>
+                                </div>
+                            </div>
                             <div id="searchResultsList" class="list-group" style="max-height: 400px; overflow-y: auto;">
                                 <!-- Results will be inserted here -->
                             </div>

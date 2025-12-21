@@ -8,6 +8,7 @@ class VideoProcessor {
         this.socket = null;
         this.currentJobId = null;
         this.isProcessing = false;
+        this.lastSearchResults = null; // Store last search results for export
         this.init();
     }
 
@@ -75,6 +76,15 @@ class VideoProcessor {
                 this.handleSearch();
             });
         }
+
+        // Export buttons
+        document.getElementById('exportResultsCsv')?.addEventListener('click', () => {
+            this.exportSearchResults('csv');
+        });
+
+        document.getElementById('exportResultsJson')?.addEventListener('click', () => {
+            this.exportSearchResults('json');
+        });
 
         // Download buttons
         document.getElementById('downloadPdf')?.addEventListener('click', (e) => {
@@ -636,6 +646,9 @@ class VideoProcessor {
 
         if (!resultsContainer || !resultsList) return;
 
+        // Store search results for export
+        this.lastSearchResults = data;
+
         if (data.count === 0) {
             resultsList.innerHTML = '<div class="text-muted p-3">No results found</div>';
             resultsContainer.style.display = 'block';
@@ -708,6 +721,162 @@ class VideoProcessor {
         const url = `/job/${jobId}/transcript?t=${timestamp}`;
         window.open(url, '_blank');
         this.showNotification(`Opening transcript at ${this.formatTime(timestamp)}...`, 'info');
+    }
+
+    exportSearchResults(format) {
+        // Get current search results from the displayed data
+        const resultsContainer = document.getElementById('searchResults');
+        if (!resultsContainer || resultsContainer.style.display === 'none') {
+            this.showNotification('No search results to export', 'warning');
+            return;
+        }
+
+        // Get the search results data from the last search
+        if (!this.lastSearchResults) {
+            this.showNotification('No search results available to export', 'warning');
+            return;
+        }
+
+        const data = this.lastSearchResults;
+        const results = data.results || [];
+
+        if (results.length === 0) {
+            this.showNotification('No results to export', 'warning');
+            return;
+        }
+
+        try {
+            if (format === 'csv') {
+                this.exportToCsv(results, data);
+            } else if (format === 'json') {
+                this.exportToJson(results, data);
+            }
+        } catch (error) {
+            console.error('Export error:', error);
+            this.showNotification(`Export failed: ${error.message}`, 'error');
+        }
+    }
+
+    exportToCsv(results, searchData) {
+        // Create CSV header
+        const headers = [
+            'Rank',
+            'Job ID',
+            'Text',
+            'Original Text',
+            'Start Time',
+            'End Time',
+            'Duration (s)',
+            'Similarity Score',
+            'Semantic Score',
+            'Keyword Score',
+            'Original Language',
+            'Target Language',
+            'Search Mode',
+            'Query'
+        ];
+
+        // Create CSV rows
+        const rows = results.map((result, index) => {
+            const duration = (result.end_time - result.start_time).toFixed(2);
+            return [
+                index + 1,
+                result.job_id,
+                this.escapeCsvField(result.text || ''),
+                this.escapeCsvField(result.original_text || result.text || ''),
+                this.formatTime(result.start_time),
+                this.formatTime(result.end_time),
+                duration,
+                (result.similarity * 100).toFixed(2) + '%',
+                (result.semantic_score || 0) * 100,
+                (result.keyword_score || 0) * 100,
+                result.original_language || 'unknown',
+                searchData.target_language || 'original',
+                searchData.search_mode || 'semantic',
+                searchData.query || ''
+            ];
+        });
+
+        // Combine header and rows
+        const csvContent = [
+            headers.join(','),
+            ...rows.map(row => row.join(','))
+        ].join('\n');
+
+        // Add BOM for Excel compatibility
+        const BOM = '\uFEFF';
+        const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `search_results_${new Date().toISOString().split('T')[0]}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+
+        this.showNotification(`Exported ${results.length} results to CSV`, 'success');
+    }
+
+    exportToJson(results, searchData) {
+        // Create export object with metadata
+        const exportData = {
+            export_info: {
+                exported_at: new Date().toISOString(),
+                query: searchData.query,
+                search_mode: searchData.search_mode,
+                target_language: searchData.target_language,
+                filters: {
+                    date_from: searchData.date_from || null,
+                    date_to: searchData.date_to || null,
+                    job_type: searchData.job_type || null,
+                    job_status: searchData.job_status || null,
+                    original_language: searchData.original_language || null
+                },
+                total_results: results.length
+            },
+            results: results.map((result, index) => ({
+                rank: index + 1,
+                job_id: result.job_id,
+                chunk_id: result.chunk_id,
+                text: result.text,
+                original_text: result.original_text || result.text,
+                start_time: result.start_time,
+                end_time: result.end_time,
+                duration: result.end_time - result.start_time,
+                similarity_score: result.similarity,
+                semantic_score: result.semantic_score || 0,
+                keyword_score: result.keyword_score || 0,
+                original_language: result.original_language,
+                chunk_index: result.chunk_index,
+                metadata: result.metadata || {}
+            }))
+        };
+
+        const jsonContent = JSON.stringify(exportData, null, 2);
+        const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8;' });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `search_results_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+
+        this.showNotification(`Exported ${results.length} results to JSON`, 'success');
+    }
+
+    escapeCsvField(field) {
+        if (field === null || field === undefined) {
+            return '';
+        }
+        const str = String(field);
+        // If field contains comma, newline, or quote, wrap in quotes and escape quotes
+        if (str.includes(',') || str.includes('\n') || str.includes('"')) {
+            return '"' + str.replace(/"/g, '""') + '"';
+        }
+        return str;
     }
 }
 
