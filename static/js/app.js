@@ -673,7 +673,7 @@ class VideoProcessor {
                 : '';
 
             return `
-                <div class="list-group-item">
+                <div class="list-group-item" id="result-${result.chunk_id}">
                     <div class="d-flex justify-content-between align-items-start mb-2">
                         <small class="text-muted">#${index + 1} • ${timeStr}</small>
                         <span class="badge bg-success" title="Combined score${data.search_mode === 'hybrid' ? ' (Semantic + Keyword)' : ''}">${scoreInfo}</span>
@@ -684,9 +684,21 @@ class VideoProcessor {
                             Job: ${result.job_id.substring(0, 8)}...
                             ${translationIndicator}
                         </small>
-                        <button class="btn btn-sm btn-outline-primary" onclick="videoProcessor.jumpToTimestamp('${result.job_id}', ${result.start_time})">
-                            <i class="fas fa-play me-1"></i>View
-                        </button>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button class="btn btn-sm btn-outline-info" onclick="videoProcessor.toggleContext('${result.chunk_id}', '${data.target_language || ''}')" id="context-btn-${result.chunk_id}">
+                                <i class="fas fa-expand-alt me-1"></i>Context
+                            </button>
+                            <button class="btn btn-sm btn-outline-primary" onclick="videoProcessor.jumpToTimestamp('${result.job_id}', ${result.start_time})">
+                                <i class="fas fa-play me-1"></i>View
+                            </button>
+                        </div>
+                    </div>
+                    <div id="context-${result.chunk_id}" class="mt-3" style="display: none;">
+                        <div class="text-center">
+                            <div class="spinner-border spinner-border-sm text-primary" role="status">
+                                <span class="visually-hidden">Loading context...</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             `;
@@ -721,6 +733,117 @@ class VideoProcessor {
         const url = `/job/${jobId}/transcript?t=${timestamp}`;
         window.open(url, '_blank');
         this.showNotification(`Opening transcript at ${this.formatTime(timestamp)}...`, 'info');
+    }
+
+    async toggleContext(chunkId, targetLanguage) {
+        const contextContainer = document.getElementById(`context-${chunkId}`);
+        const contextButton = document.getElementById(`context-btn-${chunkId}`);
+        
+        if (!contextContainer || !contextButton) return;
+        
+        // If already visible, hide it
+        if (contextContainer.style.display !== 'none') {
+            contextContainer.style.display = 'none';
+            contextButton.innerHTML = '<i class="fas fa-expand-alt me-1"></i>Context';
+            return;
+        }
+        
+        // Show loading state
+        contextContainer.style.display = 'block';
+        contextButton.disabled = true;
+        contextButton.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Loading...';
+        
+        try {
+            // Build URL with parameters
+            let url = `/api/search/context/${chunkId}?context_before=2&context_after=2`;
+            if (targetLanguage) {
+                url += `&target_language=${encodeURIComponent(targetLanguage)}`;
+            }
+            
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            if (response.ok && !data.error) {
+                this.displayContext(chunkId, data);
+                contextButton.innerHTML = '<i class="fas fa-compress-alt me-1"></i>Hide';
+            } else {
+                throw new Error(data.error || 'Failed to load context');
+            }
+        } catch (error) {
+            console.error('Error loading context:', error);
+            contextContainer.innerHTML = `
+                <div class="alert alert-warning mb-0">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    Failed to load context: ${error.message}
+                </div>
+            `;
+        } finally {
+            contextButton.disabled = false;
+        }
+    }
+
+    displayContext(chunkId, contextData) {
+        const contextContainer = document.getElementById(`context-${chunkId}`);
+        if (!contextContainer) return;
+        
+        const query = this.lastSearchResults?.query || '';
+        
+        // Build context HTML
+        let html = '<div class="context-section">';
+        
+        // Before chunks
+        if (contextData.before && contextData.before.length > 0) {
+            html += '<div class="context-before mb-2">';
+            html += '<small class="text-muted fw-bold"><i class="fas fa-arrow-up me-1"></i>Previous context:</small>';
+            contextData.before.forEach((chunk, idx) => {
+                html += `
+                    <div class="context-chunk p-2 mb-1 bg-light rounded small">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <span class="text-muted">${this.formatTime(chunk.start_time)}</span>
+                            <span class="badge bg-secondary">Chunk ${chunk.chunk_index}</span>
+                        </div>
+                        <p class="mb-0 mt-1">${this.highlightQuery(chunk.text, query)}</p>
+                    </div>
+                `;
+            });
+            html += '</div>';
+        }
+        
+        // Current chunk (highlighted)
+        html += '<div class="context-current mb-2">';
+        html += '<small class="text-primary fw-bold"><i class="fas fa-bullseye me-1"></i>Matched result:</small>';
+        html += `
+            <div class="context-chunk p-2 mb-1 bg-primary bg-opacity-10 border border-primary rounded">
+                <div class="d-flex justify-content-between align-items-start">
+                    <span class="text-primary fw-bold">${this.formatTime(contextData.chunk.start_time)}</span>
+                    <span class="badge bg-primary">Chunk ${contextData.chunk.chunk_index}</span>
+                </div>
+                <p class="mb-0 mt-1 fw-semibold">${this.highlightQuery(contextData.chunk.text, query)}</p>
+            </div>
+        `;
+        html += '</div>';
+        
+        // After chunks
+        if (contextData.after && contextData.after.length > 0) {
+            html += '<div class="context-after">';
+            html += '<small class="text-muted fw-bold"><i class="fas fa-arrow-down me-1"></i>Following context:</small>';
+            contextData.after.forEach((chunk, idx) => {
+                html += `
+                    <div class="context-chunk p-2 mb-1 bg-light rounded small">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <span class="text-muted">${this.formatTime(chunk.start_time)}</span>
+                            <span class="badge bg-secondary">Chunk ${chunk.chunk_index}</span>
+                        </div>
+                        <p class="mb-0 mt-1">${this.highlightQuery(chunk.text, query)}</p>
+                    </div>
+                `;
+            });
+            html += '</div>';
+        }
+        
+        html += '</div>';
+        
+        contextContainer.innerHTML = html;
     }
 
     exportSearchResults(format) {

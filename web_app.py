@@ -1838,6 +1838,42 @@ def list_indexed_jobs():
         return jsonify({'error': 'Failed to list indexed jobs'}), 500
 
 
+@app.route('/api/search/context/<chunk_id>')
+@require_auth(Permission.VIEW_JOB)
+def get_chunk_context(chunk_id):
+    """Get surrounding chunks for context around a search result."""
+    try:
+        from src.video_doc.search import get_search_service
+        
+        # Get optional parameters
+        context_before = int(request.args.get('context_before', 2))
+        context_after = int(request.args.get('context_after', 2))
+        target_language = request.args.get('target_language') or None
+        
+        # Validate parameters
+        if context_before < 0 or context_before > 10:
+            return jsonify({'error': 'context_before must be between 0 and 10'}), 400
+        if context_after < 0 or context_after > 10:
+            return jsonify({'error': 'context_after must be between 0 and 10'}), 400
+        
+        search_service = get_search_service()
+        context = search_service.get_chunk_context(
+            chunk_id=chunk_id,
+            context_before=context_before,
+            context_after=context_after,
+            target_language=target_language
+        )
+        
+        if 'error' in context:
+            return jsonify(context), 404
+        
+        return jsonify(context)
+        
+    except Exception as e:
+        logger.error(f"Error getting chunk context: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get chunk context', 'message': str(e)}), 500
+
+
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection."""

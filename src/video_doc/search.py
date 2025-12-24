@@ -798,6 +798,94 @@ class SearchService:
             self.logger.error(f"Hybrid search error: {e}")
             return []
     
+    def get_chunk_context(
+        self,
+        chunk_id: str,
+        context_before: int = 2,
+        context_after: int = 2,
+        target_language: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Get surrounding chunks for context around a search result.
+        
+        Args:
+            chunk_id: ID of the chunk to get context for
+            context_before: Number of chunks before to retrieve
+            context_after: Number of chunks after to retrieve
+            target_language: Language to translate context to (None = original)
+            
+        Returns:
+            Dictionary with 'chunk' (the matched chunk), 'before' (previous chunks), 
+            and 'after' (next chunks)
+        """
+        try:
+            db = get_db_session()
+            try:
+                # Get the target chunk
+                chunk_uuid = uuid.UUID(chunk_id)
+                target_chunk = db.query(TranscriptChunk).filter(
+                    TranscriptChunk.id == chunk_uuid
+                ).first()
+                
+                if not target_chunk:
+                    return {'error': 'Chunk not found'}
+                
+                # Get chunks before (lower chunk_index)
+                chunks_before = db.query(TranscriptChunk).filter(
+                    TranscriptChunk.job_id == target_chunk.job_id,
+                    TranscriptChunk.chunk_index < target_chunk.chunk_index
+                ).order_by(
+                    TranscriptChunk.chunk_index.desc()
+                ).limit(context_before).all()
+                
+                # Get chunks after (higher chunk_index)
+                chunks_after = db.query(TranscriptChunk).filter(
+                    TranscriptChunk.job_id == target_chunk.job_id,
+                    TranscriptChunk.chunk_index > target_chunk.chunk_index
+                ).order_by(
+                    TranscriptChunk.chunk_index.asc()
+                ).limit(context_after).all()
+                
+                # Reverse before chunks to get chronological order
+                chunks_before = list(reversed(chunks_before))
+                
+                # Format results
+                def format_chunk(chunk, translate=False):
+                    text = chunk.text
+                    if translate and target_language and target_language != chunk.original_language:
+                        try:
+                            text = self.translation_service.translate(
+                                chunk.text,
+                                target_language=target_language,
+                                source_language=chunk.original_language or 'auto'
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"Translation failed for context chunk {chunk.id}: {e}")
+                    
+                    return {
+                        'chunk_id': str(chunk.id),
+                        'text': text,
+                        'original_text': chunk.text,
+                        'start_time': chunk.start_time,
+                        'end_time': chunk.end_time,
+                        'chunk_index': chunk.chunk_index,
+                        'original_language': chunk.original_language
+                    }
+                
+                result = {
+                    'chunk': format_chunk(target_chunk, translate=True),
+                    'before': [format_chunk(c, translate=True) for c in chunks_before],
+                    'after': [format_chunk(c, translate=True) for c in chunks_after]
+                }
+                
+                return result
+            finally:
+                db.close()
+                
+        except Exception as e:
+            self.logger.error(f"Error getting chunk context: {e}")
+            return {'error': str(e)}
+    
     def index_transcript(
         self,
         job_id: str,
