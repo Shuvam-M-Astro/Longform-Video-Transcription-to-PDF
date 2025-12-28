@@ -1623,9 +1623,17 @@ def search_transcripts():
         
         target_language = data.get('target_language')  # Language to return results in
         job_ids = data.get('job_ids')  # Optional: filter by specific jobs
-        limit = int(data.get('limit', 10))
+        limit = int(data.get('limit', 100))  # Increased default to support pagination
         min_score = float(data.get('min_score', 0.5))
         search_mode = data.get('search_mode', 'semantic')  # 'semantic', 'keyword', or 'hybrid'
+        page = int(data.get('page', 1))
+        per_page = int(data.get('per_page', 20))
+        
+        # Validate pagination parameters
+        if page < 1:
+            return jsonify({'error': 'page must be >= 1'}), 400
+        if per_page < 1 or per_page > 100:
+            return jsonify({'error': 'per_page must be between 1 and 100'}), 400
         
         # Validate search mode
         valid_modes = ['semantic', 'keyword', 'hybrid']
@@ -1684,7 +1692,7 @@ def search_transcripts():
             return jsonify({'error': 'Invalid job_status'}), 400
         
         search_service = get_search_service()
-        results = search_service.search(
+        search_result = search_service.search(
             query=query,
             target_language=target_language,
             job_ids=job_ids,
@@ -1697,15 +1705,21 @@ def search_transcripts():
             date_to=date_to,
             job_type=job_type,
             job_status=job_status,
-            original_language=original_language
+            original_language=original_language,
+            page=page,
+            per_page=per_page
         )
         
         response_data = {
             'query': query,
             'target_language': target_language,
             'search_mode': search_mode,
-            'results': results,
-            'count': len(results)
+            'results': search_result['results'],
+            'count': len(search_result['results']),
+            'total': search_result['total'],
+            'page': search_result['page'],
+            'per_page': search_result['per_page'],
+            'total_pages': search_result['total_pages']
         }
         
         # Include weights in response if hybrid mode was used
