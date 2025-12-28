@@ -540,8 +540,10 @@ class SearchService:
         date_to: Optional[datetime] = None,
         job_type: Optional[str] = None,
         job_status: Optional[str] = None,
-        original_language: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        original_language: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 20
+    ) -> Dict[str, Any]:
         """
         Perform cross-language search with multiple modes and advanced filtering.
         
@@ -549,7 +551,7 @@ class SearchService:
             query: Search query in any language
             target_language: Language to return results in (None = original)
             job_ids: Filter by specific job IDs
-            limit: Maximum number of results
+            limit: Maximum number of results to fetch (before pagination)
             min_score: Minimum similarity score (0-1)
             search_mode: 'semantic', 'keyword', or 'hybrid'
             semantic_weight: Weight for semantic score in hybrid mode (0-1, default: 0.6)
@@ -559,12 +561,15 @@ class SearchService:
             job_type: Filter by job type ('url' or 'file')
             job_status: Filter by job status ('completed', 'failed', etc.)
             original_language: Filter by transcript language code
+            page: Page number (1-indexed)
+            per_page: Number of results per page
             
         Returns:
-            List of search results with chunks and metadata
+            Dictionary with 'results', 'total', 'page', 'per_page', 'total_pages'
         """
+        # Fetch all matching results (up to limit)
         if search_mode == 'keyword':
-            return self._search_keywords(
+            all_results = self._search_keywords(
                 query, job_ids, limit, min_score,
                 date_from, date_to, job_type, job_status, original_language
             )
@@ -572,15 +577,32 @@ class SearchService:
             # Use provided weights or defaults
             sem_weight = semantic_weight if semantic_weight is not None else 0.6
             kw_weight = keyword_weight if keyword_weight is not None else 0.4
-            return self._search_hybrid(
+            all_results = self._search_hybrid(
                 query, target_language, job_ids, limit, min_score, sem_weight, kw_weight,
                 date_from, date_to, job_type, job_status, original_language
             )
         else:  # semantic (default)
-            return self._search_semantic(
+            all_results = self._search_semantic(
                 query, target_language, job_ids, limit, min_score,
                 date_from, date_to, job_type, job_status, original_language
             )
+        
+        # Apply pagination
+        total = len(all_results)
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 0
+        page = max(1, min(page, total_pages) if total_pages > 0 else 1)
+        
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        paginated_results = all_results[start_idx:end_idx]
+        
+        return {
+            'results': paginated_results,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': total_pages
+        }
     
     def _search_semantic(
         self,
