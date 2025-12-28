@@ -9,6 +9,9 @@ class VideoProcessor {
         this.currentJobId = null;
         this.isProcessing = false;
         this.lastSearchResults = null; // Store last search results for export
+        this.currentSearchPage = 1; // Current search results page
+        this.searchPerPage = 20; // Results per page
+        this.lastSearchQuery = null; // Track last search query to detect new searches
         this.init();
     }
 
@@ -73,7 +76,7 @@ class VideoProcessor {
         if (searchForm) {
             searchForm.addEventListener('submit', (e) => {
                 e.preventDefault();
-                this.handleSearch();
+                this.handleSearch(true); // Reset to page 1 for new searches
             });
         }
 
@@ -538,7 +541,7 @@ class VideoProcessor {
         return allExtensions.some(ext => filename.toLowerCase().endsWith(ext));
     }
 
-    async handleSearch() {
+    async handleSearch(resetPage = false) {
         const queryInput = document.getElementById('searchQuery');
         const targetLanguageSelect = document.getElementById('searchTargetLanguage');
         const searchModeSelect = document.getElementById('searchMode');
@@ -547,6 +550,12 @@ class VideoProcessor {
         if (!query) {
             this.showNotification('Please enter a search query', 'warning');
             return;
+        }
+        
+        // Reset to page 1 if this is a new search (not pagination)
+        if (resetPage || !this.lastSearchQuery || this.lastSearchQuery !== query) {
+            this.currentSearchPage = 1;
+            this.lastSearchQuery = query;
         }
 
         const targetLanguage = targetLanguageSelect.value || null;
@@ -583,8 +592,10 @@ class VideoProcessor {
                 query: query,
                 target_language: targetLanguage,
                 search_mode: searchMode,
-                limit: 20,
-                min_score: 0.3
+                limit: 500, // Fetch up to 500 results for pagination
+                min_score: 0.3,
+                page: this.currentSearchPage,
+                per_page: this.searchPerPage
             };
             
             // Add weights only if in hybrid mode and weights are provided
@@ -622,7 +633,10 @@ class VideoProcessor {
 
             if (response.ok) {
                 this.displaySearchResults(data);
-                this.showNotification(`Found ${data.count} results`, 'success');
+                const totalMsg = data.total > 0 
+                    ? `Found ${data.total} result${data.total !== 1 ? 's' : ''} (showing page ${data.page} of ${data.total_pages})`
+                    : 'No results found';
+                this.showNotification(totalMsg, data.total > 0 ? 'success' : 'info');
             } else {
                 throw new Error(data.error || 'Search failed');
             }
@@ -648,10 +662,20 @@ class VideoProcessor {
 
         // Store search results for export
         this.lastSearchResults = data;
+        
+        // Update current page
+        if (data.page) {
+            this.currentSearchPage = data.page;
+        }
 
-        if (data.count === 0) {
+        if (data.count === 0 || !data.results || data.results.length === 0) {
             resultsList.innerHTML = '<div class="text-muted p-3">No results found</div>';
             resultsContainer.style.display = 'block';
+            // Hide pagination if no results
+            const paginationContainer = document.getElementById('searchPagination');
+            if (paginationContainer) {
+                paginationContainer.style.display = 'none';
+            }
             return;
         }
 
@@ -707,8 +731,127 @@ class VideoProcessor {
         resultsList.innerHTML = resultsHtml;
         resultsContainer.style.display = 'block';
         
+        // Add pagination controls
+        this.updatePaginationControls(data);
+        
         // Scroll to results
         resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    
+    updatePaginationControls(data) {
+        let paginationContainer = document.getElementById('searchPagination');
+        if (!paginationContainer) {
+            // Create pagination container if it doesn't exist
+            const resultsContainer = document.getElementById('searchResults');
+            if (resultsContainer) {
+                paginationContainer = document.createElement('div');
+                paginationContainer.id = 'searchPagination';
+                paginationContainer.className = 'mt-3';
+                resultsContainer.appendChild(paginationContainer);
+            } else {
+                return;
+            }
+        }
+        
+        const total = data.total || 0;
+        const currentPage = data.page || 1;
+        const totalPages = data.total_pages || 0;
+        const perPage = data.per_page || 20;
+        
+        if (totalPages <= 1) {
+            paginationContainer.style.display = 'none';
+            return;
+        }
+        
+        paginationContainer.style.display = 'block';
+        
+        // Calculate page range to show (show max 7 page numbers)
+        let startPage = Math.max(1, currentPage - 3);
+        let endPage = Math.min(totalPages, currentPage + 3);
+        
+        // Adjust if we're near the start or end
+        if (currentPage <= 4) {
+            endPage = Math.min(7, totalPages);
+        }
+        if (currentPage >= totalPages - 3) {
+            startPage = Math.max(1, totalPages - 6);
+        }
+        
+        // Build pagination HTML
+        let paginationHtml = `
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="text-muted small">
+                    Showing ${(currentPage - 1) * perPage + 1} to ${Math.min(currentPage * perPage, total)} of ${total} results
+                </div>
+                <nav aria-label="Search results pagination">
+                    <ul class="pagination pagination-sm mb-0">
+        `;
+        
+        // Previous button
+        paginationHtml += `
+            <li class="page-item ${currentPage === 1 ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="event.preventDefault(); videoProcessor.goToSearchPage(${currentPage - 1}); return false;" ${currentPage === 1 ? 'tabindex="-1" aria-disabled="true"' : ''}>
+                    <i class="fas fa-chevron-left"></i> Previous
+                </a>
+            </li>
+        `;
+        
+        // First page
+        if (startPage > 1) {
+            paginationHtml += `
+                <li class="page-item">
+                    <a class="page-link" href="#" onclick="event.preventDefault(); videoProcessor.goToSearchPage(1); return false;">1</a>
+                </li>
+            `;
+            if (startPage > 2) {
+                paginationHtml += `<li class="page-item disabled"><span class="page-link">...</span></li>`;
+            }
+        }
+        
+        // Page numbers
+        for (let i = startPage; i <= endPage; i++) {
+            paginationHtml += `
+                <li class="page-item ${i === currentPage ? 'active' : ''}">
+                    <a class="page-link" href="#" onclick="event.preventDefault(); videoProcessor.goToSearchPage(${i}); return false;">${i}</a>
+                </li>
+            `;
+        }
+        
+        // Last page
+        if (endPage < totalPages) {
+            if (endPage < totalPages - 1) {
+                paginationHtml += `<li class="page-item disabled"><span class="page-link">...</span></li>`;
+            }
+            paginationHtml += `
+                <li class="page-item">
+                    <a class="page-link" href="#" onclick="event.preventDefault(); videoProcessor.goToSearchPage(${totalPages}); return false;">${totalPages}</a>
+                </li>
+            `;
+        }
+        
+        // Next button
+        paginationHtml += `
+            <li class="page-item ${currentPage === totalPages ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="event.preventDefault(); videoProcessor.goToSearchPage(${currentPage + 1}); return false;" ${currentPage === totalPages ? 'tabindex="-1" aria-disabled="true"' : ''}>
+                    Next <i class="fas fa-chevron-right"></i>
+                </a>
+            </li>
+        `;
+        
+        paginationHtml += `
+                    </ul>
+                </nav>
+            </div>
+        `;
+        
+        paginationContainer.innerHTML = paginationHtml;
+    }
+    
+    goToSearchPage(page) {
+        if (page < 1) return;
+        this.currentSearchPage = page;
+        // Re-run search with new page (don't reset page, keep current query)
+        this.handleSearch(false);
     }
 
     highlightQuery(text, query) {
