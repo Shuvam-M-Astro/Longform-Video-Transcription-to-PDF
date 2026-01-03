@@ -817,6 +817,14 @@ def index():
     return render_template('index.html', user=user_session)
 
 
+@app.route('/search')
+@require_auth(Permission.VIEW_JOB)
+def search_page():
+    """Dedicated search page for transcript search."""
+    user_session = get_current_user_session()
+    return render_template('search.html', user=user_session)
+
+
 @app.route('/upload', methods=['POST'])
 @require_auth(Permission.UPLOAD_FILES)
 def upload_file():
