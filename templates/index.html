@@ -50,6 +50,11 @@
                                     <i class="fas fa-link me-2"></i>Video URL
                                 </button>
                             </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="batch-tab" data-bs-toggle="tab" data-bs-target="#batch-pane" type="button" role="tab">
+                                    <i class="fas fa-layer-group me-2"></i>Batch Process
+                                </button>
+                            </li>
                         </ul>
 
                         <!-- Tab Content -->
@@ -156,6 +161,163 @@
                                         </label>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Batch Processing Tab -->
+                <div class="tab-pane fade" id="batch-pane" role="tabpanel">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="mb-3">
+                                <i class="fas fa-layer-group me-2"></i>
+                                Batch Process Multiple Videos
+                            </h5>
+                            <p class="text-muted">Process multiple videos or URLs at once</p>
+                            
+                            <!-- Batch Input Methods -->
+                            <ul class="nav nav-pills mb-3" id="batchTabs" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="batch-files-tab" data-bs-toggle="pill" data-bs-target="#batch-files-pane" type="button">
+                                        <i class="fas fa-file-upload me-2"></i>Upload Files
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="batch-urls-tab" data-bs-toggle="pill" data-bs-target="#batch-urls-pane" type="button">
+                                        <i class="fas fa-link me-2"></i>Video URLs
+                                    </button>
+                                </li>
+                            </ul>
+
+                            <div class="tab-content" id="batchTabsContent">
+                                <!-- Batch Files Upload -->
+                                <div class="tab-pane fade show active" id="batch-files-pane" role="tabpanel">
+                                    <div class="mb-3">
+                                        <label for="batchFiles" class="form-label">Select Multiple Files</label>
+                                        <input type="file" class="form-control" id="batchFiles" multiple accept=".mp4,.mkv,.mov,.webm,.mp3,.m4a,.wav,.flac">
+                                        <div class="form-text">You can select up to 50 files at once</div>
+                                    </div>
+                                    <div id="batchFilesList" class="mb-3"></div>
+                                </div>
+
+                                <!-- Batch URLs -->
+                                <div class="tab-pane fade" id="batch-urls-pane" role="tabpanel">
+                                    <div class="mb-3">
+                                        <label for="batchUrls" class="form-label">Enter Video URLs (one per line)</label>
+                                        <textarea class="form-control" id="batchUrls" rows="10" placeholder="https://youtube.com/watch?v=...&#10;https://youtube.com/watch?v=...&#10;https://vimeo.com/..."></textarea>
+                                        <div class="form-text">Enter up to 50 URLs, one per line</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Batch Processing Options (reuse from single job) -->
+                            <div class="mt-4">
+                                <h6>Processing Options</h6>
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label for="batchLanguage" class="form-label">Language</label>
+                                            <select class="form-select" id="batchLanguage">
+                                                <option value="auto" selected>Auto-detect</option>
+                                                <option value="en">English</option>
+                                                <option value="es">Spanish</option>
+                                                <option value="fr">French</option>
+                                                <option value="de">German</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label for="batchWhisperModel" class="form-label">Whisper Model</label>
+                                            <select class="form-select" id="batchWhisperModel">
+                                                <option value="tiny">Tiny (Fastest)</option>
+                                                <option value="base">Base</option>
+                                                <option value="small">Small</option>
+                                                <option value="medium" selected>Medium (Recommended)</option>
+                                                <option value="large-v3">Large v3 (Best Quality)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="batchTranscribeOnly">
+                                            <label class="form-check-label" for="batchTranscribeOnly">
+                                                Transcribe Only (Skip keyframes)
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="mb-3">
+                                            <label for="batchReportStyle" class="form-label">Report Style</label>
+                                            <select class="form-select" id="batchReportStyle">
+                                                <option value="book" selected>Book</option>
+                                                <option value="minimal">Minimal</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <button type="button" class="btn btn-primary w-100 mt-3" id="startBatchBtn">
+                                <i class="fas fa-play me-2"></i>Start Batch Processing
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Batch Status -->
+                    <div class="card mt-4" id="batchStatusCard" style="display: none;">
+                        <div class="card-header">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">
+                                    <i class="fas fa-tasks me-2"></i>
+                                    Batch Status
+                                </h5>
+                                <span class="badge bg-primary" id="batchStatusBadge">Processing</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span>Overall Progress</span>
+                                    <span id="batchProgressPercent">0%</span>
+                                </div>
+                                <div class="progress" style="height: 25px;">
+                                    <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                         id="batchProgressBar" role="progressbar" style="width: 0%">
+                                        <span id="batchProgressText">0 / 0</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row text-center mb-3">
+                                <div class="col-4">
+                                    <div class="border rounded p-2">
+                                        <div class="h4 mb-0" id="batchTotalCount">0</div>
+                                        <small class="text-muted">Total</small>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="border rounded p-2">
+                                        <div class="h4 mb-0 text-success" id="batchCompletedCount">0</div>
+                                        <small class="text-muted">Completed</small>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="border rounded p-2">
+                                        <div class="h4 mb-0 text-danger" id="batchFailedCount">0</div>
+                                        <small class="text-muted">Failed</small>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="batchJobsList" class="list-group" style="max-height: 400px; overflow-y: auto;">
+                                <!-- Individual job statuses will appear here -->
+                            </div>
+                            <div class="mt-3">
+                                <button type="button" class="btn btn-outline-danger" id="cancelBatchBtn">
+                                    <i class="fas fa-stop me-2"></i>Cancel Batch
+                                </button>
                             </div>
                         </div>
                     </div>

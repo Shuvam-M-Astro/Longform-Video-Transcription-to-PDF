@@ -12,6 +12,8 @@ class VideoProcessor {
         this.currentSearchPage = 1; // Current search results page
         this.searchPerPage = 20; // Results per page
         this.lastSearchQuery = null; // Track last search query to detect new searches
+        this.currentBatchId = null; // Current batch job ID
+        this.batchStatusInterval = null; // Interval for batch status updates
         this.init();
     }
 
@@ -103,6 +105,19 @@ class VideoProcessor {
         document.getElementById('downloadAudio')?.addEventListener('click', (e) => {
             e.preventDefault();
             this.downloadFile('audio');
+        });
+
+        // Batch processing
+        document.getElementById('startBatchBtn')?.addEventListener('click', () => {
+            this.startBatchProcessing();
+        });
+
+        document.getElementById('cancelBatchBtn')?.addEventListener('click', () => {
+            this.cancelBatch();
+        });
+
+        document.getElementById('batchFiles')?.addEventListener('change', (e) => {
+            this.handleBatchFilesChange(e);
         });
 
         // Tab switching
@@ -987,6 +1002,648 @@ class VideoProcessor {
         html += '</div>';
         
         contextContainer.innerHTML = html;
+    }
+
+    // Batch Processing Methods
+    handleBatchFilesChange(event) {
+        const files = Array.from(event.target.files);
+        const filesList = document.getElementById('batchFilesList');
+        if (!filesList) return;
+
+        if (files.length === 0) {
+            filesList.innerHTML = '';
+            return;
+        }
+
+        if (files.length > 50) {
+            this.showNotification('Maximum 50 files allowed. Only first 50 will be processed.', 'warning');
+            files = files.slice(0, 50);
+        }
+
+        let html = '<div class="list-group">';
+        files.forEach((file, index) => {
+            const size = (file.size / (1024 * 1024)).toFixed(2);
+            html += `
+                <div class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <i class="fas fa-file me-2"></i>
+                        <strong>${this.escapeHtml(file.name)}</strong>
+                        <small class="text-muted ms-2">${size} MB</small>
+                    </div>
+                    <button class="btn btn-sm btn-outline-danger" onclick="this.closest('.list-group-item').remove()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `;
+        });
+        html += '</div>';
+        filesList.innerHTML = html;
+    }
+
+    async startBatchProcessing() {
+        const batchFilesInput = document.getElementById('batchFiles');
+        const batchUrlsTextarea = document.getElementById('batchUrls');
+        const activeTab = document.querySelector('#batchTabs .nav-link.active');
+
+        let items = [];
+
+        // Check which tab is active
+        if (activeTab && activeTab.id === 'batch-files-tab') {
+            // File upload mode
+            const files = Array.from(batchFilesInput?.files || []);
+            if (files.length === 0) {
+                this.showNotification('Please select at least one file', 'warning');
+                return;
+            }
+
+            if (files.length > 50) {
+                this.showNotification('Maximum 50 files allowed', 'error');
+                return;
+            }
+
+            // Upload files first
+            const formData = new FormData();
+            files.forEach(file => {
+                formData.append('files', file);
+            });
+
+            try {
+                const response = await fetch('/batch/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Upload failed');
+                }
+
+                const data = await response.json();
+                items = data.files.map(file => ({
+                    type: 'file',
+                    identifier: file.filename
+                }));
+            } catch (error) {
+                this.showNotification(`Upload failed: ${error.message}`, 'error');
+                return;
+            }
+        } else {
+            // URL mode
+            const urls = batchUrlsTextarea?.value.split('\n')
+                .map(url => url.trim())
+                .filter(url => url.length > 0);
+
+            if (urls.length === 0) {
+                this.showNotification('Please enter at least one URL', 'warning');
+                return;
+            }
+
+            if (urls.length > 50) {
+                this.showNotification('Maximum 50 URLs allowed', 'error');
+                return;
+            }
+
+            items = urls.map(url => ({
+                type: 'url',
+                identifier: url
+            }));
+        }
+
+        // Get processing options
+        const options = {
+            language: document.getElementById('batchLanguage')?.value || 'auto',
+            whisper_model: document.getElementById('batchWhisperModel')?.value || 'medium',
+            beam_size: 5,
+            transcribe_only: document.getElementById('batchTranscribeOnly')?.checked || false,
+            streaming: false,
+            kf_method: 'scene',
+            max_fps: 1.0,
+            min_scene_diff: 0.45,
+            report_style: document.getElementById('batchReportStyle')?.value || 'book'
+        };
+
+        // Create batch
+        try {
+            const response = await fetch('/batch/create', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    items: items,
+                    ...options
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Batch creation failed');
+            }
+
+            const data = await response.json();
+            this.currentBatchId = data.batch_id;
+            this.showNotification(`Batch processing started with ${data.total_jobs} jobs`, 'success');
+            
+            // Show batch status card
+            document.getElementById('batchStatusCard').style.display = 'block';
+            
+            // Start monitoring batch status
+            this.startBatchStatusMonitoring();
+        } catch (error) {
+            this.showNotification(`Failed to start batch: ${error.message}`, 'error');
+        }
+    }
+
+    startBatchStatusMonitoring() {
+        if (this.batchStatusInterval) {
+            clearInterval(this.batchStatusInterval);
+        }
+
+        this.batchStatusInterval = setInterval(() => {
+            this.updateBatchStatus();
+        }, 2000); // Update every 2 seconds
+
+        // Initial update
+        this.updateBatchStatus();
+    }
+
+    async updateBatchStatus() {
+        if (!this.currentBatchId) return;
+
+        try {
+            const response = await fetch(`/batch/${this.currentBatchId}`);
+            if (!response.ok) {
+                throw new Error('Failed to get batch status');
+            }
+
+            const batchData = await response.json();
+            this.updateBatchStatusUI(batchData);
+
+            // Get individual job statuses
+            const jobsResponse = await fetch(`/batch/${this.currentBatchId}/jobs`);
+            if (jobsResponse.ok) {
+                const jobsData = await jobsResponse.json();
+                this.updateBatchJobsList(jobsData.jobs);
+            }
+
+            // Stop monitoring if batch is complete
+            if (batchData.status === 'completed' || batchData.status === 'failed' || batchData.status === 'cancelled') {
+                if (this.batchStatusInterval) {
+                    clearInterval(this.batchStatusInterval);
+                    this.batchStatusInterval = null;
+                }
+            }
+        } catch (error) {
+            console.error('Error updating batch status:', error);
+        }
+    }
+
+    updateBatchStatusUI(batchData) {
+        const total = batchData.total_count || 0;
+        const completed = batchData.completed_count || 0;
+        const failed = batchData.failed_count || 0;
+        const progress = total > 0 ? ((completed + failed) / total) * 100 : 0;
+
+        // Update progress bar
+        const progressBar = document.getElementById('batchProgressBar');
+        const progressPercent = document.getElementById('batchProgressPercent');
+        const progressText = document.getElementById('batchProgressText');
+
+        if (progressBar) {
+            progressBar.style.width = `${progress}%`;
+            progressBar.textContent = `${completed + failed} / ${total}`;
+        }
+        if (progressPercent) {
+            progressPercent.textContent = `${Math.round(progress)}%`;
+        }
+        if (progressText) {
+            progressText.textContent = `${completed + failed} / ${total}`;
+        }
+
+        // Update counts
+        document.getElementById('batchTotalCount').textContent = total;
+        document.getElementById('batchCompletedCount').textContent = completed;
+        document.getElementById('batchFailedCount').textContent = failed;
+
+        // Update status badge
+        const statusBadge = document.getElementById('batchStatusBadge');
+        if (statusBadge) {
+            statusBadge.textContent = batchData.status.charAt(0).toUpperCase() + batchData.status.slice(1);
+            statusBadge.className = 'badge ' + (
+                batchData.status === 'completed' ? 'bg-success' :
+                batchData.status === 'failed' ? 'bg-danger' :
+                batchData.status === 'cancelled' ? 'bg-secondary' :
+                'bg-primary'
+            );
+        }
+    }
+
+    updateBatchJobsList(jobs) {
+        const jobsList = document.getElementById('batchJobsList');
+        if (!jobsList) return;
+
+        if (jobs.length === 0) {
+            jobsList.innerHTML = '<div class="text-muted text-center py-3">No jobs in batch</div>';
+            return;
+        }
+
+        let html = '';
+        jobs.forEach((job, index) => {
+            const identifier = job.identifier.length > 50 
+                ? job.identifier.substring(0, 50) + '...' 
+                : job.identifier;
+            
+            const statusClass = 
+                job.status === 'completed' ? 'success' :
+                job.status === 'failed' ? 'danger' :
+                job.status === 'processing' ? 'primary' :
+                'secondary';
+
+            html += `
+                <div class="list-group-item">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div class="flex-grow-1">
+                            <div class="d-flex align-items-center mb-1">
+                                <span class="badge bg-${statusClass} me-2">${job.status}</span>
+                                <small class="text-muted">#${index + 1}</small>
+                            </div>
+                            <div class="small">${this.escapeHtml(identifier)}</div>
+                            ${job.current_step ? `<div class="small text-muted mt-1">${this.escapeHtml(job.current_step)}</div>` : ''}
+                            ${job.error_message ? `<div class="small text-danger mt-1">${this.escapeHtml(job.error_message)}</div>` : ''}
+                            ${job.status === 'processing' ? `
+                                <div class="progress mt-2" style="height: 5px;">
+                                    <div class="progress-bar" style="width: ${job.progress || 0}%"></div>
+                                </div>
+                            ` : ''}
+                        </div>
+                        <div class="ms-2">
+                            ${job.status === 'completed' ? `
+                                <a href="/job/${job.job_id}/transcript" class="btn btn-sm btn-outline-primary" title="View">
+                                    <i class="fas fa-eye"></i>
+                                </a>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+        jobsList.innerHTML = html;
+    }
+
+    async cancelBatch() {
+        if (!this.currentBatchId) return;
+
+        if (!confirm('Are you sure you want to cancel this batch?')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/batch/${this.currentBatchId}/cancel`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to cancel batch');
+            }
+
+            this.showNotification('Batch cancelled', 'success');
+            if (this.batchStatusInterval) {
+                clearInterval(this.batchStatusInterval);
+                this.batchStatusInterval = null;
+            }
+            this.updateBatchStatus();
+        } catch (error) {
+            this.showNotification(`Failed to cancel batch: ${error.message}`, 'error');
+        }
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Batch Processing Methods
+    handleBatchFilesChange(event) {
+        const files = Array.from(event.target.files);
+        const filesList = document.getElementById('batchFilesList');
+        if (!filesList) return;
+
+        if (files.length === 0) {
+            filesList.innerHTML = '';
+            return;
+        }
+
+        let filesToProcess = files;
+        if (files.length > 50) {
+            this.showNotification('Maximum 50 files allowed. Only first 50 will be processed.', 'warning');
+            filesToProcess = files.slice(0, 50);
+        }
+
+        let html = '<div class="list-group">';
+        filesToProcess.forEach((file, index) => {
+            const size = (file.size / (1024 * 1024)).toFixed(2);
+            html += `
+                <div class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <i class="fas fa-file me-2"></i>
+                        <strong>${this.escapeHtml(file.name)}</strong>
+                        <small class="text-muted ms-2">${size} MB</small>
+                    </div>
+                    <button class="btn btn-sm btn-outline-danger" onclick="this.closest('.list-group-item').remove()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `;
+        });
+        html += '</div>';
+        filesList.innerHTML = html;
+    }
+
+    async startBatchProcessing() {
+        const batchFilesInput = document.getElementById('batchFiles');
+        const batchUrlsTextarea = document.getElementById('batchUrls');
+        const activeTab = document.querySelector('#batchTabs .nav-link.active');
+
+        let items = [];
+
+        // Check which tab is active
+        if (activeTab && activeTab.id === 'batch-files-tab') {
+            // File upload mode
+            const files = Array.from(batchFilesInput?.files || []);
+            if (files.length === 0) {
+                this.showNotification('Please select at least one file', 'warning');
+                return;
+            }
+
+            if (files.length > 50) {
+                this.showNotification('Maximum 50 files allowed', 'error');
+                return;
+            }
+
+            // Upload files first
+            const formData = new FormData();
+            files.forEach(file => {
+                formData.append('files', file);
+            });
+
+            try {
+                const response = await fetch('/batch/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Upload failed');
+                }
+
+                const data = await response.json();
+                items = data.files.map(file => ({
+                    type: 'file',
+                    identifier: file.filename
+                }));
+            } catch (error) {
+                this.showNotification(`Upload failed: ${error.message}`, 'error');
+                return;
+            }
+        } else {
+            // URL mode
+            const urls = batchUrlsTextarea?.value.split('\n')
+                .map(url => url.trim())
+                .filter(url => url.length > 0);
+
+            if (urls.length === 0) {
+                this.showNotification('Please enter at least one URL', 'warning');
+                return;
+            }
+
+            if (urls.length > 50) {
+                this.showNotification('Maximum 50 URLs allowed', 'error');
+                return;
+            }
+
+            items = urls.map(url => ({
+                type: 'url',
+                identifier: url
+            }));
+        }
+
+        // Get processing options
+        const options = {
+            language: document.getElementById('batchLanguage')?.value || 'auto',
+            whisper_model: document.getElementById('batchWhisperModel')?.value || 'medium',
+            beam_size: 5,
+            transcribe_only: document.getElementById('batchTranscribeOnly')?.checked || false,
+            streaming: false,
+            kf_method: 'scene',
+            max_fps: 1.0,
+            min_scene_diff: 0.45,
+            report_style: document.getElementById('batchReportStyle')?.value || 'book'
+        };
+
+        // Create batch
+        try {
+            const response = await fetch('/batch/create', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    items: items,
+                    ...options
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Batch creation failed');
+            }
+
+            const data = await response.json();
+            this.currentBatchId = data.batch_id;
+            this.showNotification(`Batch processing started with ${data.total_jobs} jobs`, 'success');
+            
+            // Show batch status card
+            document.getElementById('batchStatusCard').style.display = 'block';
+            
+            // Start monitoring batch status
+            this.startBatchStatusMonitoring();
+        } catch (error) {
+            this.showNotification(`Failed to start batch: ${error.message}`, 'error');
+        }
+    }
+
+    startBatchStatusMonitoring() {
+        if (this.batchStatusInterval) {
+            clearInterval(this.batchStatusInterval);
+        }
+
+        this.batchStatusInterval = setInterval(() => {
+            this.updateBatchStatus();
+        }, 2000); // Update every 2 seconds
+
+        // Initial update
+        this.updateBatchStatus();
+    }
+
+    async updateBatchStatus() {
+        if (!this.currentBatchId) return;
+
+        try {
+            const response = await fetch(`/batch/${this.currentBatchId}`);
+            if (!response.ok) {
+                throw new Error('Failed to get batch status');
+            }
+
+            const batchData = await response.json();
+            this.updateBatchStatusUI(batchData);
+
+            // Get individual job statuses
+            const jobsResponse = await fetch(`/batch/${this.currentBatchId}/jobs`);
+            if (jobsResponse.ok) {
+                const jobsData = await jobsResponse.json();
+                this.updateBatchJobsList(jobsData.jobs);
+            }
+
+            // Stop monitoring if batch is complete
+            if (batchData.status === 'completed' || batchData.status === 'failed' || batchData.status === 'cancelled') {
+                if (this.batchStatusInterval) {
+                    clearInterval(this.batchStatusInterval);
+                    this.batchStatusInterval = null;
+                }
+            }
+        } catch (error) {
+            console.error('Error updating batch status:', error);
+        }
+    }
+
+    updateBatchStatusUI(batchData) {
+        const total = batchData.total_count || 0;
+        const completed = batchData.completed_count || 0;
+        const failed = batchData.failed_count || 0;
+        const progress = total > 0 ? ((completed + failed) / total) * 100 : 0;
+
+        // Update progress bar
+        const progressBar = document.getElementById('batchProgressBar');
+        const progressPercent = document.getElementById('batchProgressPercent');
+        const progressText = document.getElementById('batchProgressText');
+
+        if (progressBar) {
+            progressBar.style.width = `${progress}%`;
+            progressBar.textContent = `${completed + failed} / ${total}`;
+        }
+        if (progressPercent) {
+            progressPercent.textContent = `${Math.round(progress)}%`;
+        }
+        if (progressText) {
+            progressText.textContent = `${completed + failed} / ${total}`;
+        }
+
+        // Update counts
+        const totalEl = document.getElementById('batchTotalCount');
+        const completedEl = document.getElementById('batchCompletedCount');
+        const failedEl = document.getElementById('batchFailedCount');
+        if (totalEl) totalEl.textContent = total;
+        if (completedEl) completedEl.textContent = completed;
+        if (failedEl) failedEl.textContent = failed;
+
+        // Update status badge
+        const statusBadge = document.getElementById('batchStatusBadge');
+        if (statusBadge) {
+            statusBadge.textContent = batchData.status.charAt(0).toUpperCase() + batchData.status.slice(1);
+            statusBadge.className = 'badge ' + (
+                batchData.status === 'completed' ? 'bg-success' :
+                batchData.status === 'failed' ? 'bg-danger' :
+                batchData.status === 'cancelled' ? 'bg-secondary' :
+                'bg-primary'
+            );
+        }
+    }
+
+    updateBatchJobsList(jobs) {
+        const jobsList = document.getElementById('batchJobsList');
+        if (!jobsList) return;
+
+        if (jobs.length === 0) {
+            jobsList.innerHTML = '<div class="text-muted text-center py-3">No jobs in batch</div>';
+            return;
+        }
+
+        let html = '';
+        jobs.forEach((job, index) => {
+            const identifier = job.identifier.length > 50 
+                ? job.identifier.substring(0, 50) + '...' 
+                : job.identifier;
+            
+            const statusClass = 
+                job.status === 'completed' ? 'success' :
+                job.status === 'failed' ? 'danger' :
+                job.status === 'processing' ? 'primary' :
+                'secondary';
+
+            html += `
+                <div class="list-group-item">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div class="flex-grow-1">
+                            <div class="d-flex align-items-center mb-1">
+                                <span class="badge bg-${statusClass} me-2">${job.status}</span>
+                                <small class="text-muted">#${index + 1}</small>
+                            </div>
+                            <div class="small">${this.escapeHtml(identifier)}</div>
+                            ${job.current_step ? `<div class="small text-muted mt-1">${this.escapeHtml(job.current_step)}</div>` : ''}
+                            ${job.error_message ? `<div class="small text-danger mt-1">${this.escapeHtml(job.error_message)}</div>` : ''}
+                            ${job.status === 'processing' ? `
+                                <div class="progress mt-2" style="height: 5px;">
+                                    <div class="progress-bar" style="width: ${job.progress || 0}%"></div>
+                                </div>
+                            ` : ''}
+                        </div>
+                        <div class="ms-2">
+                            ${job.status === 'completed' ? `
+                                <a href="/job/${job.job_id}/transcript" class="btn btn-sm btn-outline-primary" title="View">
+                                    <i class="fas fa-eye"></i>
+                                </a>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+        jobsList.innerHTML = html;
+    }
+
+    async cancelBatch() {
+        if (!this.currentBatchId) return;
+
+        if (!confirm('Are you sure you want to cancel this batch?')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/batch/${this.currentBatchId}/cancel`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to cancel batch');
+            }
+
+            this.showNotification('Batch cancelled', 'success');
+            if (this.batchStatusInterval) {
+                clearInterval(this.batchStatusInterval);
+                this.batchStatusInterval = null;
+            }
+            this.updateBatchStatus();
+        } catch (error) {
+            this.showNotification(`Failed to cancel batch: ${error.message}`, 'error');
+        }
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
     }
 
     exportSearchResults(format) {

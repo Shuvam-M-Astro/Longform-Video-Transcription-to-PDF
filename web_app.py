@@ -93,6 +93,10 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 processing_jobs: Dict[str, 'ProcessingJob'] = {}
 job_lock = threading.Lock()
 
+# Global storage for batch jobs
+batch_jobs: Dict[str, 'BatchJob'] = {}
+batch_lock = threading.Lock()
+
 # Cleanup thread
 cleanup_thread: Optional[threading.Thread] = None
 cleanup_running = False
@@ -807,6 +811,79 @@ class ProcessingJob:
         })
 
 
+class BatchJob:
+    """Represents a batch of video processing jobs."""
+    
+    def __init__(self, batch_id: str, options: Dict[str, Any]):
+        self.batch_id = batch_id
+        self.options = options
+        self.status = 'pending'  # pending, processing, completed, failed, cancelled
+        self.job_ids: List[str] = []
+        self.completed_count = 0
+        self.failed_count = 0
+        self.total_count = 0
+        self.created_at = datetime.now()
+        self.start_time = None
+        self.end_time = None
+        self.error_message = ''
+        
+    def add_job(self, job_id: str):
+        """Add a job to this batch."""
+        if job_id not in self.job_ids:
+            self.job_ids.append(job_id)
+            self.total_count = len(self.job_ids)
+    
+    def update_status(self):
+        """Update batch status based on individual job statuses."""
+        with job_lock:
+            completed = 0
+            failed = 0
+            processing = 0
+            pending = 0
+            
+            for job_id in self.job_ids:
+                if job_id in processing_jobs:
+                    job = processing_jobs[job_id]
+                    if job.status == 'completed':
+                        completed += 1
+                    elif job.status == 'failed':
+                        failed += 1
+                    elif job.status == 'processing':
+                        processing += 1
+                    else:
+                        pending += 1
+            
+            self.completed_count = completed
+            self.failed_count = failed
+            
+            if self.status == 'cancelled':
+                return
+            
+            if completed + failed == self.total_count:
+                self.status = 'completed' if failed == 0 else 'failed'
+                self.end_time = time.time()
+            elif processing > 0 or completed > 0 or failed > 0:
+                self.status = 'processing'
+                if not self.start_time:
+                    self.start_time = time.time()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert batch job to dictionary."""
+        self.update_status()
+        return {
+            'batch_id': self.batch_id,
+            'status': self.status,
+            'total_count': self.total_count,
+            'completed_count': self.completed_count,
+            'failed_count': self.failed_count,
+            'created_at': self.created_at.isoformat(),
+            'start_time': self.start_time,
+            'end_time': self.end_time,
+            'job_ids': self.job_ids,
+            'options': self.options
+        }
+
+
 @app.route('/')
 @optional_auth
 def index():
@@ -1153,6 +1230,270 @@ def cleanup_job(job_id):
     except Exception as e:
         logger.error(f"Error cleaning up job {job_id}: {e}", exc_info=True)
         return jsonify({'error': 'Failed to cleanup job'}), 500
+
+
+# Batch Processing Endpoints
+@app.route('/batch/create', methods=['POST'])
+@require_auth(Permission.CREATE_JOB)
+def create_batch():
+    """Create a new batch processing job."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        # Get items (files or URLs)
+        items = data.get('items', [])
+        if not items or not isinstance(items, list):
+            return jsonify({'error': 'Items list is required'}), 400
+        
+        if len(items) == 0:
+            return jsonify({'error': 'At least one item is required'}), 400
+        
+        if len(items) > 50:  # Limit batch size
+            return jsonify({'error': 'Maximum 50 items per batch'}), 400
+        
+        # Get and validate processing options
+        try:
+            options = {
+                'language': data.get('language', 'auto'),
+                'whisper_model': data.get('whisper_model', 'medium'),
+                'beam_size': int(data.get('beam_size', 5)),
+                'transcribe_only': data.get('transcribe_only', False),
+                'streaming': data.get('streaming', False),
+                'kf_method': data.get('kf_method', 'scene'),
+                'max_fps': float(data.get('max_fps', 1.0)),
+                'min_scene_diff': float(data.get('min_scene_diff', 0.45)),
+                'report_style': data.get('report_style', 'book')
+            }
+            validate_processing_options(options)
+        except (ValueError, ValidationError) as e:
+            return jsonify({'error': str(e)}), 400
+        
+        # Create batch job
+        batch_id = str(uuid.uuid4())
+        batch_job = BatchJob(batch_id, options)
+        
+        # Process each item
+        created_jobs = []
+        for item in items:
+            item_type = item.get('type')  # 'url' or 'file'
+            identifier = item.get('identifier')  # URL or file path
+            
+            if not item_type or not identifier:
+                continue
+            
+            if item_type == 'url':
+                validate_url(identifier)
+            elif item_type == 'file':
+                # File should already be uploaded
+                file_path = Path(app.config['UPLOAD_FOLDER']) / identifier
+                if not file_path.exists():
+                    logger.warning(f"File not found: {file_path}")
+                    continue
+                identifier = str(file_path)
+            else:
+                continue
+            
+            # Create individual job
+            job_id = str(uuid.uuid4())
+            try:
+                job = ProcessingJob(job_id, item_type, identifier, options)
+                with job_lock:
+                    processing_jobs[job_id] = job
+                batch_job.add_job(job_id)
+                created_jobs.append(job_id)
+            except Exception as e:
+                logger.error(f"Error creating job for item {identifier}: {e}")
+                continue
+        
+        if len(created_jobs) == 0:
+            return jsonify({'error': 'No valid items to process'}), 400
+        
+        # Store batch job
+        with batch_lock:
+            batch_jobs[batch_id] = batch_job
+        
+        # Start processing all jobs
+        for job_id in created_jobs:
+            try:
+                with job_lock:
+                    if job_id in processing_jobs:
+                        processing_jobs[job_id].start_processing()
+            except Exception as e:
+                logger.error(f"Error starting job {job_id}: {e}")
+        
+        logger.info(f"Created batch {batch_id} with {len(created_jobs)} jobs")
+        
+        return jsonify({
+            'batch_id': batch_id,
+            'status': 'started',
+            'total_jobs': len(created_jobs),
+            'job_ids': created_jobs,
+            'message': f'Batch processing started with {len(created_jobs)} jobs'
+        })
+        
+    except ValidationError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Unexpected error in create_batch: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/batch/upload', methods=['POST'])
+@require_auth(Permission.UPLOAD_FILES)
+def batch_upload_files():
+    """Handle batch file upload."""
+    try:
+        if 'files' not in request.files:
+            return jsonify({'error': 'No files provided'}), 400
+        
+        files = request.files.getlist('files')
+        if not files or len(files) == 0:
+            return jsonify({'error': 'No files provided'}), 400
+        
+        if len(files) > 50:
+            return jsonify({'error': 'Maximum 50 files per batch'}), 400
+        
+        # Validate and save all files
+        uploaded_files = []
+        for file in files:
+            try:
+                validate_file_upload(file)
+                job_id = str(uuid.uuid4())
+                original_filename = sanitize_filename(file.filename)
+                filename = f"{job_id}_{original_filename}"
+                file_path = Path(app.config['UPLOAD_FOLDER']) / filename
+                file.save(file_path)
+                uploaded_files.append({
+                    'job_id': job_id,
+                    'filename': filename,
+                    'original_filename': original_filename,
+                    'path': str(file_path)
+                })
+                logger.info(f"Saved uploaded file: {file_path}")
+            except ValidationError as e:
+                logger.warning(f"File validation failed: {e}")
+                continue
+            except Exception as e:
+                logger.error(f"Failed to save file: {e}")
+                continue
+        
+        if len(uploaded_files) == 0:
+            return jsonify({'error': 'No valid files uploaded'}), 400
+        
+        return jsonify({
+            'files': uploaded_files,
+            'count': len(uploaded_files),
+            'message': f'Successfully uploaded {len(uploaded_files)} files'
+        })
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in batch_upload_files: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/batch/<batch_id>')
+@require_auth(Permission.VIEW_JOB)
+def get_batch_status(batch_id):
+    """Get batch job status."""
+    try:
+        with batch_lock:
+            if batch_id not in batch_jobs:
+                return jsonify({'error': 'Batch not found'}), 404
+            
+            batch_job = batch_jobs[batch_id]
+            return jsonify(batch_job.to_dict())
+            
+    except Exception as e:
+        logger.error(f"Error getting batch status {batch_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get batch status'}), 500
+
+
+@app.route('/batch/<batch_id>/jobs')
+@require_auth(Permission.VIEW_JOB)
+def get_batch_jobs(batch_id):
+    """Get all jobs in a batch."""
+    try:
+        with batch_lock:
+            if batch_id not in batch_jobs:
+                return jsonify({'error': 'Batch not found'}), 404
+            
+            batch_job = batch_jobs[batch_id]
+            jobs = []
+            
+            with job_lock:
+                for job_id in batch_job.job_ids:
+                    if job_id in processing_jobs:
+                        job = processing_jobs[job_id]
+                        jobs.append({
+                            'job_id': job_id,
+                            'job_type': job.job_type,
+                            'identifier': job.identifier,
+                            'status': job.status,
+                            'progress': job.progress,
+                            'current_step': job.current_step,
+                            'error_message': job.error_message,
+                            'start_time': job.start_time,
+                            'end_time': job.end_time
+                        })
+            
+            return jsonify({
+                'batch_id': batch_id,
+                'jobs': jobs,
+                'count': len(jobs)
+            })
+            
+    except Exception as e:
+        logger.error(f"Error getting batch jobs {batch_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get batch jobs'}), 500
+
+
+@app.route('/batch/<batch_id>/cancel', methods=['POST'])
+@require_auth(Permission.VIEW_JOB)
+def cancel_batch(batch_id):
+    """Cancel a batch processing job."""
+    try:
+        with batch_lock:
+            if batch_id not in batch_jobs:
+                return jsonify({'error': 'Batch not found'}), 404
+            
+            batch_job = batch_jobs[batch_id]
+            if batch_job.status in ['completed', 'failed', 'cancelled']:
+                return jsonify({'error': 'Batch cannot be cancelled'}), 400
+            
+            batch_job.status = 'cancelled'
+            batch_job.end_time = time.time()
+            
+            # Cancel all individual jobs
+            with job_lock:
+                for job_id in batch_job.job_ids:
+                    if job_id in processing_jobs:
+                        processing_jobs[job_id].cancel()
+            
+            logger.info(f"Cancelled batch {batch_id}")
+            return jsonify({'message': 'Batch cancelled successfully'})
+            
+    except Exception as e:
+        logger.error(f"Error cancelling batch {batch_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to cancel batch'}), 500
+
+
+@app.route('/batches')
+@require_auth(Permission.VIEW_JOB)
+def list_batches():
+    """List all batch jobs."""
+    try:
+        with batch_lock:
+            batches = []
+            for batch_id, batch_job in batch_jobs.items():
+                batches.append(batch_job.to_dict())
+        
+        return jsonify({'batches': batches, 'count': len(batches)})
+        
+    except Exception as e:
+        logger.error(f"Error listing batches: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to list batches'}), 500
 
 
 @app.route('/cleanup-stale', methods=['POST'])
