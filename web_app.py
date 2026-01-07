@@ -902,6 +902,14 @@ def search_page():
     return render_template('search.html', user=user_session)
 
 
+@app.route('/jobs-dashboard')
+@require_auth(Permission.VIEW_JOB)
+def jobs_dashboard():
+    """Jobs management dashboard."""
+    user_session = get_current_user_session()
+    return render_template('jobs_dashboard.html', user=user_session)
+
+
 @app.route('/upload', methods=['POST'])
 @require_auth(Permission.UPLOAD_FILES)
 def upload_file():
@@ -1164,18 +1172,29 @@ def get_transcript_segments(job_id):
 @app.route('/jobs')
 @require_auth(Permission.VIEW_JOB)
 def list_jobs():
-    """List all processing jobs."""
+    """List all processing jobs with filtering and sorting."""
     try:
+        # Get query parameters
+        status_filter = request.args.get('status', '').lower()
+        type_filter = request.args.get('type', '').lower()
+        search_query = request.args.get('search', '').lower()
+        sort_by = request.args.get('sort', 'created_desc')
+        
+        all_jobs = []
+        
+        # Get individual jobs
         with job_lock:
-            jobs = []
             for job_id, job in processing_jobs.items():
-                jobs.append({
+                all_jobs.append({
+                    'id': job_id,
                     'job_id': job_id,
                     'job_type': job.job_type,
+                    'type': 'job',
                     'identifier': job.identifier,
                     'status': job.status,
                     'progress': job.progress,
                     'current_step': job.current_step,
+                    'error_message': job.error_message,
                     'start_time': job.start_time,
                     'end_time': job.end_time,
                     'duration': job.end_time - job.start_time if job.end_time and job.start_time else None,
@@ -1183,7 +1202,61 @@ def list_jobs():
                     'last_activity': job.last_activity.isoformat()
                 })
         
-        return jsonify({'jobs': jobs})
+        # Get batch jobs
+        with batch_lock:
+            for batch_id, batch_job in batch_jobs.items():
+                batch_job.update_status()
+                all_jobs.append({
+                    'id': batch_id,
+                    'job_id': batch_id,
+                    'job_type': 'batch',
+                    'type': 'batch',
+                    'identifier': f"Batch ({batch_job.total_count} jobs)",
+                    'status': batch_job.status,
+                    'progress': (batch_job.completed_count + batch_job.failed_count) / batch_job.total_count * 100 if batch_job.total_count > 0 else 0,
+                    'current_step': f"{batch_job.completed_count}/{batch_job.total_count} completed",
+                    'error_message': batch_job.error_message,
+                    'start_time': batch_job.start_time,
+                    'end_time': batch_job.end_time,
+                    'duration': batch_job.end_time - batch_job.start_time if batch_job.end_time and batch_job.start_time else None,
+                    'created_at': batch_job.created_at.isoformat(),
+                    'last_activity': batch_job.created_at.isoformat(),
+                    'total_count': batch_job.total_count,
+                    'completed_count': batch_job.completed_count,
+                    'failed_count': batch_job.failed_count
+                })
+        
+        # Apply filters
+        filtered_jobs = all_jobs
+        if status_filter:
+            filtered_jobs = [j for j in filtered_jobs if j['status'] == status_filter]
+        if type_filter:
+            if type_filter == 'batch':
+                filtered_jobs = [j for j in filtered_jobs if j['type'] == 'batch']
+            else:
+                filtered_jobs = [j for j in filtered_jobs if j['type'] == 'job' and j['job_type'] == type_filter]
+        if search_query:
+            filtered_jobs = [j for j in filtered_jobs if 
+                           search_query in j['identifier'].lower() or 
+                           search_query in j['job_id'].lower() or
+                           (j.get('current_step', '') and search_query in j['current_step'].lower())]
+        
+        # Apply sorting
+        if sort_by == 'created_desc':
+            filtered_jobs.sort(key=lambda x: x['created_at'], reverse=True)
+        elif sort_by == 'created_asc':
+            filtered_jobs.sort(key=lambda x: x['created_at'])
+        elif sort_by == 'status':
+            filtered_jobs.sort(key=lambda x: x['status'])
+        elif sort_by == 'type':
+            filtered_jobs.sort(key=lambda x: (x['type'], x.get('job_type', '')))
+        
+        return jsonify({
+            'jobs': filtered_jobs,
+            'total': len(filtered_jobs),
+            'filtered': len(filtered_jobs),
+            'all_total': len(all_jobs)
+        })
     except Exception as e:
         logger.error(f"Error listing jobs: {e}", exc_info=True)
         return jsonify({'error': 'Failed to list jobs'}), 500
