@@ -39,6 +39,9 @@ from src.video_doc.security_enhancements import security_manager, password_polic
 from src.video_doc.user_management import user_manager, session_manager
 from src.video_doc.enhanced_api_docs import create_api_docs_blueprint
 
+# Import database functionality
+from src.video_doc.database import get_db_session, ProcessingJob as DBProcessingJob, ProcessingStatus, JobManager
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -206,6 +209,7 @@ class ProcessingJob:
         self.thread = None
         self.created_at = datetime.now()
         self.last_activity = datetime.now()
+        self.db_job_id = None  # Database job ID if persisted
         
         # Validate options
         try:
@@ -213,6 +217,9 @@ class ProcessingJob:
         except ValidationError as e:
             logger.error(f"Invalid options for job {job_id}: {e}")
             raise
+        
+        # Persist to database
+        self._persist_to_db()
         
     def start_processing(self) -> None:
         """Start processing in a separate thread."""
@@ -265,6 +272,7 @@ class ProcessingJob:
         try:
             self.status = 'processing'
             self.start_time = time.time()
+            self._update_db_status()
             self._emit_status_update()
             
             # Prepare arguments for main processing
@@ -646,6 +654,7 @@ class ProcessingJob:
             self.status = 'completed'
             self.progress = 100.0
             self.end_time = time.time()
+            self._update_db_status()
             self._emit_status_update()
             
             # Automatically index transcript for search (async, non-blocking)
@@ -679,6 +688,7 @@ class ProcessingJob:
             self.error_message = str(e)
             self.end_time = time.time()
             self.last_activity = datetime.now()
+            self._update_db_status()
             self._emit_status_update()
             logger.error(f"Processing error for job {self.job_id}: {e}", exc_info=True)
             
@@ -809,6 +819,54 @@ class ProcessingJob:
             'job_id': self.job_id,
             'current_step': step
         })
+    
+    def _persist_to_db(self):
+        """Persist job to database."""
+        try:
+            db = get_db_session()
+            try:
+                job_manager = JobManager(db)
+                db_job = job_manager.create_job(
+                    job_type=self.job_type,
+                    identifier=self.identifier,
+                    config=self.options
+                )
+                self.db_job_id = str(db_job.id)
+                logger.info(f"Persisted job {self.job_id} to database as {self.db_job_id}")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Failed to persist job {self.job_id} to database: {e}")
+            # Don't fail the job creation if DB persistence fails
+    
+    def _update_db_status(self):
+        """Update job status in database."""
+        if not self.db_job_id:
+            return
+        
+        try:
+            db = get_db_session()
+            try:
+                job_manager = JobManager(db)
+                status_map = {
+                    'pending': ProcessingStatus.PENDING,
+                    'processing': ProcessingStatus.PROCESSING,
+                    'completed': ProcessingStatus.COMPLETED,
+                    'failed': ProcessingStatus.FAILED,
+                    'cancelled': ProcessingStatus.CANCELLED
+                }
+                
+                job_manager.update_job_status(
+                    job_id=self.db_job_id,
+                    status=status_map.get(self.status, ProcessingStatus.PENDING),
+                    progress=self.progress,
+                    current_step=self.current_step,
+                    error_message=self.error_message if self.error_message else None
+                )
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Failed to update job {self.job_id} in database: {e}")
 
 
 class BatchJob:
@@ -1567,6 +1625,110 @@ def list_batches():
     except Exception as e:
         logger.error(f"Error listing batches: {e}", exc_info=True)
         return jsonify({'error': 'Failed to list batches'}), 500
+
+
+# Job History Endpoints
+@app.route('/jobs/history')
+@require_auth(Permission.VIEW_JOB)
+def job_history_page():
+    """Job history dashboard page."""
+    user_session = get_current_user_session()
+    return render_template('job_history.html', user=user_session)
+
+
+@app.route('/api/jobs/history')
+@require_auth(Permission.VIEW_JOB)
+def get_job_history():
+    """Get job history from database with pagination and filtering."""
+    try:
+        db = get_db_session()
+        try:
+            # Get query parameters
+            page = int(request.args.get('page', 1))
+            per_page = int(request.args.get('per_page', 20))
+            status_filter = request.args.get('status')
+            job_type_filter = request.args.get('job_type')
+            search_query = request.args.get('search')
+            
+            # Validate pagination
+            if page < 1:
+                page = 1
+            if per_page < 1 or per_page > 100:
+                per_page = 20
+            
+            # Build query
+            query = db.query(DBProcessingJob)
+            
+            # Apply filters
+            if status_filter:
+                query = query.filter(DBProcessingJob.status == status_filter)
+            if job_type_filter:
+                query = query.filter(DBProcessingJob.job_type == job_type_filter)
+            if search_query:
+                query = query.filter(
+                    or_(
+                        DBProcessingJob.identifier.ilike(f'%{search_query}%'),
+                        DBProcessingJob.current_step.ilike(f'%{search_query}%')
+                    )
+                )
+            
+            # Get total count
+            total = query.count()
+            
+            # Apply pagination and ordering
+            jobs = query.order_by(DBProcessingJob.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+            
+            # Format results
+            jobs_data = []
+            for job in jobs:
+                jobs_data.append({
+                    'id': str(job.id),
+                    'job_type': job.job_type,
+                    'identifier': job.identifier,
+                    'status': job.status,
+                    'progress': job.progress,
+                    'current_step': job.current_step,
+                    'error_message': job.error_message,
+                    'created_at': job.created_at.isoformat() if job.created_at else None,
+                    'started_at': job.started_at.isoformat() if job.started_at else None,
+                    'completed_at': job.completed_at.isoformat() if job.completed_at else None,
+                    'duration': (job.completed_at - job.started_at).total_seconds() if job.completed_at and job.started_at else None
+                })
+            
+            total_pages = (total + per_page - 1) // per_page if total > 0 else 0
+            
+            return jsonify({
+                'jobs': jobs_data,
+                'pagination': {
+                    'page': page,
+                    'per_page': per_page,
+                    'total': total,
+                    'total_pages': total_pages
+                }
+            })
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error getting job history: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get job history'}), 500
+
+
+@app.route('/api/jobs/stats')
+@require_auth(Permission.VIEW_JOB)
+def get_job_stats():
+    """Get job statistics."""
+    try:
+        db = get_db_session()
+        try:
+            job_manager = JobManager(db)
+            stats = job_manager.get_job_stats()
+            return jsonify(stats)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Error getting job stats: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get job stats'}), 500
 
 
 @app.route('/cleanup-stale', methods=['POST'])
