@@ -485,26 +485,119 @@ class VideoProcessor {
             const statusClass = `job-status ${job.status}`;
             const progress = Math.round(job.progress || 0);
             const duration = job.duration ? `${Math.round(job.duration)}s` : 'N/A';
+            const identifier = job.identifier || (job.job_type === 'url' ? 'URL' : 'File');
+            const shortIdentifier = identifier.length > 30 ? identifier.substring(0, 30) + '...' : identifier;
             
             return `
-                <div class="job-item">
+                <div class="job-item border rounded p-2 mb-2">
                     <div class="d-flex justify-content-between align-items-start mb-2">
-                        <div class="text-truncate" style="max-width: 150px;">
-                            ${job.job_type === 'url' ? 'URL' : 'File'}
+                        <div class="text-truncate" style="max-width: 200px;" title="${this.escapeHtml(identifier)}">
+                            <small class="text-muted">${job.job_type === 'url' ? '🔗' : '📁'}</small>
+                            <span class="small">${this.escapeHtml(shortIdentifier)}</span>
                         </div>
-                        <span class="${statusClass}">${job.status}</span>
+                        <span class="badge bg-${this.getStatusBadgeColor(job.status)}">${job.status}</span>
                     </div>
-                    <div class="job-progress mb-2">
-                        <div class="job-progress-bar" style="width: ${progress}%"></div>
+                    ${job.status === 'processing' || job.status === 'pending' ? `
+                        <div class="progress mb-2" style="height: 4px;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                 style="width: ${progress}%"></div>
+                        </div>
+                    ` : ''}
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div class="small text-muted">
+                            ${job.current_step || 'No current step'} • ${duration}
+                        </div>
+                        <div class="btn-group btn-group-sm">
+                            ${job.status === 'completed' ? `
+                                <a href="/job/${job.job_id}/transcript" class="btn btn-sm btn-outline-primary" title="View">
+                                    <i class="fas fa-eye"></i>
+                                </a>
+                            ` : ''}
+                            ${job.status === 'failed' || job.status === 'cancelled' ? `
+                                <button class="btn btn-sm btn-outline-warning" 
+                                        onclick="videoProcessor.retryJob('${job.job_id}')" 
+                                        title="Retry">
+                                    <i class="fas fa-redo"></i>
+                                </button>
+                            ` : ''}
+                            ${job.status === 'processing' || job.status === 'pending' ? `
+                                <button class="btn btn-sm btn-outline-danger" 
+                                        onclick="videoProcessor.cancelJob('${job.job_id}')" 
+                                        title="Cancel">
+                                    <i class="fas fa-stop"></i>
+                                </button>
+                            ` : ''}
+                        </div>
                     </div>
-                    <div class="small text-muted">
-                        ${job.current_step || 'No current step'} • ${duration}
-                    </div>
+                    ${job.error_message ? `
+                        <div class="small text-danger mt-1">
+                            <i class="fas fa-exclamation-triangle me-1"></i>
+                            ${this.escapeHtml(job.error_message.substring(0, 100))}
+                        </div>
+                    ` : ''}
                 </div>
             `;
         }).join('');
 
         container.innerHTML = jobsHtml;
+    }
+
+    getStatusBadgeColor(status) {
+        const colors = {
+            'completed': 'success',
+            'processing': 'primary',
+            'pending': 'secondary',
+            'failed': 'danger',
+            'cancelled': 'warning'
+        };
+        return colors[status] || 'secondary';
+    }
+
+    async retryJob(jobId) {
+        if (!confirm('Retry this job with the same settings?')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/job/${jobId}/retry`, {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                this.showNotification(`Job retry started. New job ID: ${data.new_job_id.substring(0, 8)}...`, 'success');
+                // Reload recent jobs to show the new job
+                setTimeout(() => this.loadRecentJobs(), 1000);
+            } else {
+                throw new Error(data.error || 'Retry failed');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to retry job: ${error.message}`, 'error');
+        }
+    }
+
+    async cancelJob(jobId) {
+        if (!confirm('Cancel this job?')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/job/${jobId}/cancel`, {
+                method: 'POST'
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                this.showNotification('Job cancelled successfully', 'success');
+                setTimeout(() => this.loadRecentJobs(), 500);
+            } else {
+                throw new Error(data.error || 'Cancel failed');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to cancel job: ${error.message}`, 'error');
+        }
     }
 
     showNotification(message, type = 'info') {

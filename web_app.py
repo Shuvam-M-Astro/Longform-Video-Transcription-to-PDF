@@ -1340,6 +1340,54 @@ def cancel_job(job_id):
         return jsonify({'error': 'Failed to cancel job'}), 500
 
 
+@app.route('/job/<job_id>/retry', methods=['POST'])
+@require_auth(Permission.CREATE_JOB)
+def retry_job(job_id):
+    """Retry a failed or cancelled job."""
+    try:
+        with job_lock:
+            if job_id not in processing_jobs:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            original_job = processing_jobs[job_id]
+            
+            # Only allow retry for failed or cancelled jobs
+            if original_job.status not in ['failed', 'cancelled']:
+                return jsonify({'error': f'Job cannot be retried. Current status: {original_job.status}'}), 400
+            
+            # Create a new job with the same parameters
+            new_job_id = str(uuid.uuid4())
+            new_job = ProcessingJob(
+                job_id=new_job_id,
+                job_type=original_job.job_type,
+                identifier=original_job.identifier,
+                options=original_job.options
+            )
+            
+            # Add to processing jobs
+            processing_jobs[new_job_id] = new_job
+            
+            # Start processing
+            try:
+                new_job.start_processing()
+                logger.info(f"Retrying job {job_id} as new job {new_job_id}")
+                
+                return jsonify({
+                    'message': 'Job retry started successfully',
+                    'original_job_id': job_id,
+                    'new_job_id': new_job_id,
+                    'status': 'started'
+                })
+            except ValueError as e:
+                # Remove the job if starting failed
+                del processing_jobs[new_job_id]
+                return jsonify({'error': str(e)}), 400
+                
+    except Exception as e:
+        logger.error(f"Error retrying job {job_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to retry job'}), 500
+
+
 @app.route('/job/<job_id>/cleanup', methods=['POST'])
 def cleanup_job(job_id):
     """Clean up job resources."""
