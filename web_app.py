@@ -1112,22 +1112,58 @@ def process_url():
 
 @app.route('/job/<job_id>')
 def job_status(job_id):
-    """Get job status."""
+    """Get job status from memory or database."""
+    # First check in-memory jobs
     with job_lock:
-        if job_id not in processing_jobs:
-            return jsonify({'error': 'Job not found'}), 404
-        
-        job = processing_jobs[job_id]
-        return jsonify({
-            'job_id': job_id,
-            'status': job.status,
-            'progress': job.progress,
-            'current_step': job.current_step,
-            'error_message': job.error_message,
-            'start_time': job.start_time,
-            'end_time': job.end_time,
-            'duration': job.end_time - job.start_time if job.end_time and job.start_time else None
-        })
+        if job_id in processing_jobs:
+            job = processing_jobs[job_id]
+            return jsonify({
+                'job_id': job_id,
+                'status': job.status,
+                'progress': job.progress,
+                'current_step': job.current_step,
+                'error_message': job.error_message,
+                'start_time': job.start_time,
+                'end_time': job.end_time,
+                'duration': job.end_time - job.start_time if job.end_time and job.start_time else None,
+                'in_memory': True
+            })
+    
+    # If not in memory, check database
+    try:
+        db = get_db_session()
+        try:
+            job_uuid = uuid.UUID(job_id)
+            db_job = db.query(DBProcessingJob).filter(DBProcessingJob.id == job_uuid).first()
+            
+            if not db_job:
+                return jsonify({'error': 'Job not found'}), 404
+            
+            duration = None
+            if db_job.completed_at and db_job.started_at:
+                duration = (db_job.completed_at - db_job.started_at).total_seconds()
+            elif db_job.started_at:
+                duration = (datetime.utcnow() - db_job.started_at).total_seconds()
+            
+            return jsonify({
+                'job_id': job_id,
+                'status': db_job.status,
+                'progress': db_job.progress or 0.0,
+                'current_step': db_job.current_step or '',
+                'error_message': db_job.error_message or '',
+                'start_time': db_job.started_at.timestamp() if db_job.started_at else None,
+                'end_time': db_job.completed_at.timestamp() if db_job.completed_at else None,
+                'duration': duration,
+                'created_at': db_job.created_at.isoformat() if db_job.created_at else None,
+                'in_memory': False
+            })
+        finally:
+            db.close()
+    except ValueError:
+        return jsonify({'error': 'Invalid job ID format'}), 400
+    except Exception as e:
+        logger.error(f"Error getting job status from database: {e}")
+        return jsonify({'error': 'Job not found'}), 404
 
 
 @app.route('/download/<job_id>/<file_type>')
@@ -1230,19 +1266,30 @@ def get_transcript_segments(job_id):
 @app.route('/jobs')
 @require_auth(Permission.VIEW_JOB)
 def list_jobs():
-    """List all processing jobs with filtering and sorting."""
+    """List all processing jobs with filtering and sorting, including database jobs."""
     try:
         # Get query parameters
         status_filter = request.args.get('status', '').lower()
         type_filter = request.args.get('type', '').lower()
         search_query = request.args.get('search', '').lower()
         sort_by = request.args.get('sort', 'created_desc')
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
+        include_db = request.args.get('include_db', 'true').lower() == 'true'
+        
+        # Validate pagination
+        if page < 1:
+            page = 1
+        if per_page < 1 or per_page > 200:
+            per_page = 50
         
         all_jobs = []
+        in_memory_job_ids = set()
         
-        # Get individual jobs
+        # Get individual jobs from memory
         with job_lock:
             for job_id, job in processing_jobs.items():
+                in_memory_job_ids.add(job_id)
                 all_jobs.append({
                     'id': job_id,
                     'job_id': job_id,
@@ -1257,8 +1304,79 @@ def list_jobs():
                     'end_time': job.end_time,
                     'duration': job.end_time - job.start_time if job.end_time and job.start_time else None,
                     'created_at': job.created_at.isoformat(),
-                    'last_activity': job.last_activity.isoformat()
+                    'last_activity': job.last_activity.isoformat(),
+                    'in_memory': True
                 })
+        
+        # Get jobs from database (excluding those already in memory)
+        if include_db:
+            try:
+                db = get_db_session()
+                try:
+                    query = db.query(DBProcessingJob)
+                    
+                    # Apply filters
+                    if status_filter:
+                        query = query.filter(DBProcessingJob.status == status_filter)
+                    if type_filter and type_filter != 'batch':
+                        query = query.filter(DBProcessingJob.job_type == type_filter)
+                    if search_query:
+                        query = query.filter(
+                            or_(
+                                DBProcessingJob.identifier.ilike(f'%{search_query}%'),
+                                DBProcessingJob.current_step.ilike(f'%{search_query}%')
+                            )
+                        )
+                    
+                    # Get total count
+                    total_db_jobs = query.count()
+                    
+                    # Apply sorting
+                    if sort_by == 'created_desc':
+                        query = query.order_by(DBProcessingJob.created_at.desc())
+                    elif sort_by == 'created_asc':
+                        query = query.order_by(DBProcessingJob.created_at.asc())
+                    elif sort_by == 'status':
+                        query = query.order_by(DBProcessingJob.status, DBProcessingJob.created_at.desc())
+                    
+                    # Get jobs (limit to avoid too many results)
+                    db_jobs = query.limit(1000).all()
+                    
+                    for db_job in db_jobs:
+                        db_job_id = str(db_job.id)
+                        # Skip if already in memory
+                        if db_job_id in in_memory_job_ids:
+                            continue
+                        
+                        # Calculate duration
+                        duration = None
+                        if db_job.completed_at and db_job.started_at:
+                            duration = (db_job.completed_at - db_job.started_at).total_seconds()
+                        elif db_job.started_at:
+                            duration = (datetime.utcnow() - db_job.started_at).total_seconds()
+                        
+                        all_jobs.append({
+                            'id': db_job_id,
+                            'job_id': db_job_id,
+                            'job_type': db_job.job_type,
+                            'type': 'job',
+                            'identifier': db_job.identifier,
+                            'status': db_job.status,
+                            'progress': db_job.progress or 0.0,
+                            'current_step': db_job.current_step or '',
+                            'error_message': db_job.error_message or '',
+                            'start_time': db_job.started_at.timestamp() if db_job.started_at else None,
+                            'end_time': db_job.completed_at.timestamp() if db_job.completed_at else None,
+                            'duration': duration,
+                            'created_at': db_job.created_at.isoformat() if db_job.created_at else None,
+                            'last_activity': db_job.last_activity.isoformat() if db_job.last_activity else None,
+                            'in_memory': False
+                        })
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Error loading jobs from database: {e}")
+                # Continue with in-memory jobs only
         
         # Get batch jobs
         with batch_lock:
@@ -1299,21 +1417,36 @@ def list_jobs():
                            search_query in j['job_id'].lower() or
                            (j.get('current_step', '') and search_query in j['current_step'].lower())]
         
-        # Apply sorting
-        if sort_by == 'created_desc':
-            filtered_jobs.sort(key=lambda x: x['created_at'], reverse=True)
-        elif sort_by == 'created_asc':
-            filtered_jobs.sort(key=lambda x: x['created_at'])
-        elif sort_by == 'status':
-            filtered_jobs.sort(key=lambda x: x['status'])
-        elif sort_by == 'type':
-            filtered_jobs.sort(key=lambda x: (x['type'], x.get('job_type', '')))
+        # Apply sorting (only if not already sorted by DB query)
+        if not include_db or sort_by not in ['created_desc', 'created_asc', 'status']:
+            if sort_by == 'created_desc':
+                filtered_jobs.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+            elif sort_by == 'created_asc':
+                filtered_jobs.sort(key=lambda x: x.get('created_at', ''))
+            elif sort_by == 'status':
+                filtered_jobs.sort(key=lambda x: (x.get('status', ''), x.get('created_at', '')), reverse=True)
+            elif sort_by == 'type':
+                filtered_jobs.sort(key=lambda x: (x.get('type', ''), x.get('job_type', '')))
+        
+        # Apply pagination
+        total_jobs = len(filtered_jobs)
+        total_pages = (total_jobs + per_page - 1) // per_page if total_jobs > 0 else 0
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        paginated_jobs = filtered_jobs[start_idx:end_idx]
         
         return jsonify({
-            'jobs': filtered_jobs,
-            'total': len(filtered_jobs),
+            'jobs': paginated_jobs,
+            'total': total_jobs,
             'filtered': len(filtered_jobs),
-            'all_total': len(all_jobs)
+            'all_total': len(all_jobs),
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total_pages': total_pages,
+                'has_next': page < total_pages,
+                'has_prev': page > 1
+            }
         })
     except Exception as e:
         logger.error(f"Error listing jobs: {e}", exc_info=True)
