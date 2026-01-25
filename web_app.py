@@ -1912,6 +1912,206 @@ def get_job_stats():
         return jsonify({'error': 'Failed to get job stats'}), 500
 
 
+@app.route('/api/jobs/analytics')
+@require_auth(Permission.VIEW_JOB)
+def get_job_analytics():
+    """Get comprehensive job analytics and insights."""
+    try:
+        db = get_db_session()
+        try:
+            from sqlalchemy import func, extract
+            from datetime import datetime, timedelta
+            
+            # Basic statistics
+            total_jobs = db.query(DBProcessingJob).count()
+            completed_jobs = db.query(DBProcessingJob).filter(
+                DBProcessingJob.status == ProcessingStatus.COMPLETED
+            ).count()
+            failed_jobs = db.query(DBProcessingJob).filter(
+                DBProcessingJob.status == ProcessingStatus.FAILED
+            ).count()
+            processing_jobs = db.query(DBProcessingJob).filter(
+                DBProcessingJob.status == ProcessingStatus.PROCESSING
+            ).count()
+            
+            # Success rate
+            success_rate = (completed_jobs / total_jobs * 100) if total_jobs > 0 else 0
+            
+            # Average processing time for completed jobs
+            avg_duration = db.query(
+                func.avg(
+                    func.extract('epoch', DBProcessingJob.completed_at - DBProcessingJob.started_at)
+                )
+            ).filter(
+                DBProcessingJob.status == ProcessingStatus.COMPLETED,
+                DBProcessingJob.completed_at.isnot(None),
+                DBProcessingJob.started_at.isnot(None)
+            ).scalar() or 0
+            
+            # Jobs by type
+            jobs_by_type = db.query(
+                DBProcessingJob.job_type,
+                func.count(DBProcessingJob.id).label('count')
+            ).group_by(DBProcessingJob.job_type).all()
+            
+            # Jobs by status
+            jobs_by_status = db.query(
+                DBProcessingJob.status,
+                func.count(DBProcessingJob.id).label('count')
+            ).group_by(DBProcessingJob.status).all()
+            
+            # Jobs over time (last 30 days)
+            thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+            # Use cast to date for cross-database compatibility
+            try:
+                from sqlalchemy import cast, Date
+                jobs_over_time = db.query(
+                    cast(DBProcessingJob.created_at, Date).label('date'),
+                    func.count(DBProcessingJob.id).label('count')
+                ).filter(
+                    DBProcessingJob.created_at >= thirty_days_ago
+                ).group_by(
+                    cast(DBProcessingJob.created_at, Date)
+                ).order_by(
+                    cast(DBProcessingJob.created_at, Date)
+                ).all()
+            except:
+                # Fallback: group by date string
+                jobs_over_time = []
+                jobs = db.query(DBProcessingJob).filter(
+                    DBProcessingJob.created_at >= thirty_days_ago
+                ).all()
+                from collections import defaultdict
+                daily_counts = defaultdict(int)
+                for job in jobs:
+                    date_str = job.created_at.date().isoformat()
+                    daily_counts[date_str] += 1
+                jobs_over_time = [(date, count) for date, count in sorted(daily_counts.items())]
+            
+            # Jobs by day of week (0=Monday, 6=Sunday)
+            try:
+                jobs_by_day = db.query(
+                    extract('dow', DBProcessingJob.created_at).label('day_of_week'),
+                    func.count(DBProcessingJob.id).label('count')
+                ).filter(
+                    DBProcessingJob.created_at >= thirty_days_ago
+                ).group_by(
+                    extract('dow', DBProcessingJob.created_at)
+                ).all()
+            except Exception as e:
+                # Fallback: calculate in Python
+                logger.debug(f"Using fallback for jobs_by_day: {e}")
+                jobs_by_day = []
+                jobs = db.query(DBProcessingJob).filter(
+                    DBProcessingJob.created_at >= thirty_days_ago
+                ).all()
+                from collections import defaultdict
+                day_counts = defaultdict(int)
+                for job in jobs:
+                    day_of_week = job.created_at.weekday()  # 0=Monday, 6=Sunday
+                    day_counts[day_of_week] += 1
+                jobs_by_day = [(day, count) for day, count in sorted(day_counts.items())]
+            
+            # Most common errors
+            common_errors = db.query(
+                DBProcessingJob.error_message,
+                func.count(DBProcessingJob.id).label('count')
+            ).filter(
+                DBProcessingJob.status == ProcessingStatus.FAILED,
+                DBProcessingJob.error_message.isnot(None),
+                DBProcessingJob.error_message != ''
+            ).group_by(
+                DBProcessingJob.error_message
+            ).order_by(
+                func.count(DBProcessingJob.id).desc()
+            ).limit(10).all()
+            
+            # Average processing time by job type
+            avg_duration_by_type = db.query(
+                DBProcessingJob.job_type,
+                func.avg(
+                    func.extract('epoch', DBProcessingJob.completed_at - DBProcessingJob.started_at)
+                ).label('avg_duration')
+            ).filter(
+                DBProcessingJob.status == ProcessingStatus.COMPLETED,
+                DBProcessingJob.completed_at.isnot(None),
+                DBProcessingJob.started_at.isnot(None)
+            ).group_by(DBProcessingJob.job_type).all()
+            
+            # Recent activity (last 24 hours)
+            twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+            try:
+                # Try PostgreSQL date_trunc function
+                from sqlalchemy import text
+                recent_activity = db.query(
+                    text("date_trunc('hour', processing_jobs.created_at) as hour"),
+                    func.count(DBProcessingJob.id).label('count')
+                ).filter(
+                    DBProcessingJob.created_at >= twenty_four_hours_ago
+                ).group_by(
+                    text("date_trunc('hour', processing_jobs.created_at)")
+                ).order_by(
+                    text("date_trunc('hour', processing_jobs.created_at)")
+                ).all()
+            except Exception as e:
+                # Fallback: calculate in Python
+                logger.debug(f"Using fallback for recent_activity: {e}")
+                recent_activity = []
+                jobs = db.query(DBProcessingJob).filter(
+                    DBProcessingJob.created_at >= twenty_four_hours_ago
+                ).all()
+                from collections import defaultdict
+                hourly_counts = defaultdict(int)
+                for job in jobs:
+                    # Round to nearest hour
+                    hour = job.created_at.replace(minute=0, second=0, microsecond=0)
+                    hourly_counts[hour] += 1
+                recent_activity = [(hour, count) for hour, count in sorted(hourly_counts.items())]
+            
+            return jsonify({
+                'summary': {
+                    'total_jobs': total_jobs,
+                    'completed_jobs': completed_jobs,
+                    'failed_jobs': failed_jobs,
+                    'processing_jobs': processing_jobs,
+                    'success_rate': round(success_rate, 2),
+                    'avg_duration_seconds': round(avg_duration, 2) if avg_duration else 0
+                },
+                'by_type': {job_type: count for job_type, count in jobs_by_type},
+                'by_status': {status: count for status, count in jobs_by_status},
+                'over_time': [
+                    {'date': date.isoformat() if hasattr(date, 'isoformat') else str(date), 'count': count}
+                    for date, count in jobs_over_time
+                ],
+                'by_day_of_week': {int(day): count for day, count in jobs_by_day},
+                'common_errors': [
+                    {'error': error[:200] if error else 'Unknown error', 'count': count}
+                    for error, count in common_errors
+                ],
+                'avg_duration_by_type': {
+                    job_type: round(avg_dur, 2) if avg_dur else 0
+                    for job_type, avg_dur in avg_duration_by_type
+                },
+                'recent_activity': [
+                    {'hour': hour.isoformat() if hasattr(hour, 'isoformat') else (str(hour) if isinstance(hour, datetime) else hour), 'count': count}
+                    for hour, count in recent_activity
+                ]
+            })
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Error getting job analytics: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get job analytics'}), 500
+
+
+@app.route('/analytics')
+@require_auth(Permission.VIEW_JOB)
+def analytics_page():
+    """Job analytics dashboard page."""
+    user_session = get_current_user_session()
+    return render_template('analytics.html', user=user_session)
+
+
 @app.route('/cleanup-stale', methods=['POST'])
 def cleanup_stale_jobs():
     """Clean up stale jobs."""
