@@ -1912,6 +1912,191 @@ def get_job_stats():
         return jsonify({'error': 'Failed to get job stats'}), 500
 
 
+@app.route('/api/jobs/export')
+@require_auth(Permission.VIEW_JOB)
+def export_jobs():
+    """Export jobs data as CSV or JSON."""
+    try:
+        export_format = request.args.get('format', 'json').lower()
+        if export_format not in ['json', 'csv']:
+            return jsonify({'error': 'Invalid format. Use "json" or "csv"'}), 400
+        
+        # Get filter parameters (same as list_jobs)
+        status_filter = request.args.get('status', '').lower()
+        type_filter = request.args.get('type', '').lower()
+        search_query = request.args.get('search', '').lower()
+        include_db = request.args.get('include_db', 'true').lower() == 'true'
+        
+        # Get all jobs (no pagination for export)
+        all_jobs = []
+        in_memory_job_ids = set()
+        
+        # Get individual jobs from memory
+        with job_lock:
+            for job_id, job in processing_jobs.items():
+                in_memory_job_ids.add(job_id)
+                all_jobs.append({
+                    'job_id': job_id,
+                    'job_type': job.job_type,
+                    'type': 'job',
+                    'identifier': job.identifier,
+                    'status': job.status,
+                    'progress': job.progress,
+                    'current_step': job.current_step,
+                    'error_message': job.error_message,
+                    'start_time': job.start_time,
+                    'end_time': job.end_time,
+                    'duration': job.end_time - job.start_time if job.end_time and job.start_time else None,
+                    'created_at': job.created_at.isoformat(),
+                    'last_activity': job.last_activity.isoformat()
+                })
+        
+        # Get jobs from database
+        if include_db:
+            try:
+                db = get_db_session()
+                try:
+                    from sqlalchemy import or_
+                    query = db.query(DBProcessingJob)
+                    
+                    if status_filter:
+                        query = query.filter(DBProcessingJob.status == status_filter)
+                    if type_filter and type_filter != 'batch':
+                        query = query.filter(DBProcessingJob.job_type == type_filter)
+                    if search_query:
+                        query = query.filter(
+                            or_(
+                                DBProcessingJob.identifier.ilike(f'%{search_query}%'),
+                                DBProcessingJob.current_step.ilike(f'%{search_query}%')
+                            )
+                        )
+                    
+                    db_jobs = query.order_by(DBProcessingJob.created_at.desc()).limit(5000).all()
+                    
+                    for db_job in db_jobs:
+                        db_job_id = str(db_job.id)
+                        if db_job_id in in_memory_job_ids:
+                            continue
+                        
+                        duration = None
+                        if db_job.completed_at and db_job.started_at:
+                            duration = (db_job.completed_at - db_job.started_at).total_seconds()
+                        elif db_job.started_at:
+                            duration = (datetime.utcnow() - db_job.started_at).total_seconds()
+                        
+                        all_jobs.append({
+                            'job_id': db_job_id,
+                            'job_type': db_job.job_type,
+                            'type': 'job',
+                            'identifier': db_job.identifier,
+                            'status': db_job.status,
+                            'progress': db_job.progress or 0.0,
+                            'current_step': db_job.current_step or '',
+                            'error_message': db_job.error_message or '',
+                            'start_time': db_job.started_at.timestamp() if db_job.started_at else None,
+                            'end_time': db_job.completed_at.timestamp() if db_job.completed_at else None,
+                            'duration': duration,
+                            'created_at': db_job.created_at.isoformat() if db_job.created_at else None,
+                            'last_activity': db_job.last_activity.isoformat() if db_job.last_activity else None
+                        })
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Error loading jobs from database for export: {e}")
+        
+        # Get batch jobs
+        with batch_lock:
+            for batch_id, batch_job in batch_jobs.items():
+                batch_job.update_status()
+                all_jobs.append({
+                    'job_id': batch_id,
+                    'job_type': 'batch',
+                    'type': 'batch',
+                    'identifier': f"Batch ({batch_job.total_count} jobs)",
+                    'status': batch_job.status,
+                    'progress': (batch_job.completed_count + batch_job.failed_count) / batch_job.total_count * 100 if batch_job.total_count > 0 else 0,
+                    'current_step': f"{batch_job.completed_count}/{batch_job.total_count} completed",
+                    'error_message': batch_job.error_message,
+                    'start_time': batch_job.start_time,
+                    'end_time': batch_job.end_time,
+                    'duration': batch_job.end_time - batch_job.start_time if batch_job.end_time and batch_job.start_time else None,
+                    'created_at': batch_job.created_at.isoformat(),
+                    'last_activity': batch_job.created_at.isoformat(),
+                    'total_count': batch_job.total_count,
+                    'completed_count': batch_job.completed_count,
+                    'failed_count': batch_job.failed_count
+                })
+        
+        # Apply filters
+        filtered_jobs = all_jobs
+        if status_filter:
+            filtered_jobs = [j for j in filtered_jobs if j['status'] == status_filter]
+        if type_filter:
+            if type_filter == 'batch':
+                filtered_jobs = [j for j in filtered_jobs if j['type'] == 'batch']
+            else:
+                filtered_jobs = [j for j in filtered_jobs if j['type'] == 'job' and j['job_type'] == type_filter]
+        if search_query and not include_db:
+            filtered_jobs = [j for j in filtered_jobs if search_query in j['identifier'].lower() or (j.get('current_step', '') and search_query in j['current_step'].lower())]
+        
+        # Sort by created_at descending
+        filtered_jobs.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        # Generate export
+        if export_format == 'csv':
+            import csv
+            import io
+            
+            output = io.StringIO()
+            if filtered_jobs:
+                fieldnames = ['job_id', 'job_type', 'type', 'identifier', 'status', 'progress', 
+                             'current_step', 'error_message', 'duration', 'created_at', 'last_activity']
+                writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction='ignore')
+                writer.writeheader()
+                for job in filtered_jobs:
+                    # Convert timestamps to ISO strings for CSV
+                    row = job.copy()
+                    if row.get('start_time') and isinstance(row['start_time'], (int, float)):
+                        row['start_time'] = datetime.fromtimestamp(row['start_time']).isoformat()
+                    if row.get('end_time') and isinstance(row['end_time'], (int, float)):
+                        row['end_time'] = datetime.fromtimestamp(row['end_time']).isoformat()
+                    writer.writerow(row)
+            
+            csv_data = output.getvalue()
+            output.close()
+            
+            response = app.response_class(
+                csv_data,
+                mimetype='text/csv',
+                headers={'Content-Disposition': f'attachment; filename=jobs_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'}
+            )
+            return response
+        else:  # JSON
+            export_data = {
+                'export_info': {
+                    'exported_at': datetime.utcnow().isoformat(),
+                    'total_jobs': len(filtered_jobs),
+                    'filters': {
+                        'status': status_filter or None,
+                        'type': type_filter or None,
+                        'search': search_query or None
+                    }
+                },
+                'jobs': filtered_jobs
+            }
+            
+            response = app.response_class(
+                json.dumps(export_data, indent=2, default=str),
+                mimetype='application/json',
+                headers={'Content-Disposition': f'attachment; filename=jobs_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'}
+            )
+            return response
+            
+    except Exception as e:
+        logger.error(f"Error exporting jobs: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to export jobs'}), 500
+
+
 @app.route('/api/jobs/analytics')
 @require_auth(Permission.VIEW_JOB)
 def get_job_analytics():

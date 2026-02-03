@@ -600,6 +600,53 @@ class VideoProcessor {
         }
     }
 
+    async exportJobs(format) {
+        try {
+            // Get current filter values from the page if available
+            const statusFilter = document.getElementById('filterStatus')?.value || '';
+            const typeFilter = document.getElementById('filterType')?.value || '';
+            const searchQuery = document.getElementById('searchJobs')?.value || '';
+            
+            const params = new URLSearchParams();
+            params.append('format', format);
+            if (statusFilter) params.append('status', statusFilter);
+            if (typeFilter) params.append('type', typeFilter);
+            if (searchQuery) params.append('search', searchQuery);
+            
+            const response = await fetch(`/api/jobs/export?${params.toString()}`);
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Export failed');
+            }
+            
+            // Get filename from Content-Disposition header or use default
+            const contentDisposition = response.headers.get('Content-Disposition');
+            let filename = `jobs_export_${new Date().toISOString().split('T')[0]}.${format}`;
+            if (contentDisposition) {
+                const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+                if (filenameMatch) {
+                    filename = filenameMatch[1];
+                }
+            }
+            
+            // Download the file
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            this.showNotification(`Jobs exported successfully as ${format.toUpperCase()}`, 'success');
+        } catch (error) {
+            this.showNotification(`Failed to export jobs: ${error.message}`, 'error');
+        }
+    }
+
     showNotification(message, type = 'info') {
         const toast = document.getElementById('notificationToast');
         const toastMessage = document.getElementById('toastMessage');
