@@ -1544,6 +1544,132 @@ def cleanup_job(job_id):
         return jsonify({'error': 'Failed to cleanup job'}), 500
 
 
+@app.route('/job/<job_id>', methods=['DELETE'])
+@require_auth(Permission.DELETE_JOB)
+def delete_job(job_id):
+    """Delete a job and its associated files."""
+    try:
+        deleted_from_memory = False
+        deleted_from_db = False
+        
+        # Delete from memory if exists
+        with job_lock:
+            if job_id in processing_jobs:
+                job = processing_jobs[job_id]
+                # Cancel if still processing
+                if job.status == 'processing':
+                    job.cancel()
+                # Cleanup resources
+                job.cleanup()
+                del processing_jobs[job_id]
+                deleted_from_memory = True
+                logger.info(f"Deleted job {job_id} from memory")
+        
+        # Delete from database
+        try:
+            db = get_db_session()
+            try:
+                db_job = db.query(DBProcessingJob).filter(DBProcessingJob.id == job_id).first()
+                if db_job:
+                    db.delete(db_job)
+                    db.commit()
+                    deleted_from_db = True
+                    logger.info(f"Deleted job {job_id} from database")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Error deleting job {job_id} from database: {e}")
+        
+        # Delete output directory
+        output_dir = Path(app.config['OUTPUT_FOLDER']) / job_id
+        if output_dir.exists():
+            try:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                logger.info(f"Deleted output directory for job {job_id}")
+            except Exception as e:
+                logger.warning(f"Error deleting output directory for job {job_id}: {e}")
+        
+        if deleted_from_memory or deleted_from_db:
+            return jsonify({'message': 'Job deleted successfully'})
+        else:
+            return jsonify({'error': 'Job not found'}), 404
+            
+    except Exception as e:
+        logger.error(f"Error deleting job {job_id}: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to delete job'}), 500
+
+
+@app.route('/api/jobs/bulk-delete', methods=['POST'])
+@require_auth(Permission.DELETE_JOB)
+def bulk_delete_jobs():
+    """Delete multiple jobs at once."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        job_ids = data.get('job_ids', [])
+        if not job_ids or not isinstance(job_ids, list):
+            return jsonify({'error': 'job_ids list is required'}), 400
+        
+        if len(job_ids) > 100:
+            return jsonify({'error': 'Maximum 100 jobs can be deleted at once'}), 400
+        
+        deleted_count = 0
+        failed_count = 0
+        errors = []
+        
+        for job_id in job_ids:
+            try:
+                # Delete from memory if exists
+                with job_lock:
+                    if job_id in processing_jobs:
+                        job = processing_jobs[job_id]
+                        if job.status == 'processing':
+                            job.cancel()
+                        job.cleanup()
+                        del processing_jobs[job_id]
+                
+                # Delete from database
+                try:
+                    db = get_db_session()
+                    try:
+                        db_job = db.query(DBProcessingJob).filter(DBProcessingJob.id == job_id).first()
+                        if db_job:
+                            db.delete(db_job)
+                            db.commit()
+                    finally:
+                        db.close()
+                except Exception as e:
+                    logger.warning(f"Error deleting job {job_id} from database: {e}")
+                
+                # Delete output directory
+                output_dir = Path(app.config['OUTPUT_FOLDER']) / job_id
+                if output_dir.exists():
+                    try:
+                        shutil.rmtree(output_dir, ignore_errors=True)
+                    except Exception as e:
+                        logger.warning(f"Error deleting output directory for job {job_id}: {e}")
+                
+                deleted_count += 1
+                
+            except Exception as e:
+                failed_count += 1
+                errors.append({'job_id': job_id, 'error': str(e)})
+                logger.error(f"Error deleting job {job_id}: {e}")
+        
+        return jsonify({
+            'message': f'Deleted {deleted_count} job(s)',
+            'deleted_count': deleted_count,
+            'failed_count': failed_count,
+            'errors': errors
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in bulk delete: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to delete jobs'}), 500
+
+
 # Batch Processing Endpoints
 @app.route('/batch/create', methods=['POST'])
 @require_auth(Permission.CREATE_JOB)

@@ -478,10 +478,22 @@ class VideoProcessor {
 
         if (jobs.length === 0) {
             container.innerHTML = '<div class="text-muted">No recent jobs</div>';
+            const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
+            if (bulkDeleteBtn) bulkDeleteBtn.style.display = 'none';
             return;
         }
 
+        // Show bulk delete button if there are deletable jobs
+        const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
+        const hasDeletableJobs = jobs.some(job => 
+            job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+        );
+        if (bulkDeleteBtn) {
+            bulkDeleteBtn.style.display = hasDeletableJobs ? 'inline-block' : 'none';
+        }
+
         const jobsHtml = jobs.slice(0, 5).map(job => {
+            const canDelete = job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled';
             const statusClass = `job-status ${job.status}`;
             const progress = Math.round(job.progress || 0);
             const duration = job.duration ? `${Math.round(job.duration)}s` : 'N/A';
@@ -491,9 +503,16 @@ class VideoProcessor {
             return `
                 <div class="job-item border rounded p-2 mb-2">
                     <div class="d-flex justify-content-between align-items-start mb-2">
-                        <div class="text-truncate" style="max-width: 200px;" title="${this.escapeHtml(identifier)}">
-                            <small class="text-muted">${job.job_type === 'url' ? '🔗' : '📁'}</small>
-                            <span class="small">${this.escapeHtml(shortIdentifier)}</span>
+                        <div class="d-flex align-items-center text-truncate" style="max-width: 200px;" title="${this.escapeHtml(identifier)}">
+                            ${canDelete ? `
+                                <input type="checkbox" class="form-check-input me-2 job-checkbox" 
+                                       value="${job.job_id}" 
+                                       onchange="videoProcessor.updateBulkDeleteButton()">
+                            ` : ''}
+                            <div class="text-truncate">
+                                <small class="text-muted">${job.job_type === 'url' ? '🔗' : '📁'}</small>
+                                <span class="small">${this.escapeHtml(shortIdentifier)}</span>
+                            </div>
                         </div>
                         <span class="badge bg-${this.getStatusBadgeColor(job.status)}">${job.status}</span>
                     </div>
@@ -512,12 +531,22 @@ class VideoProcessor {
                                 <a href="/job/${job.job_id}/transcript" class="btn btn-sm btn-outline-primary" title="View">
                                     <i class="fas fa-eye"></i>
                                 </a>
+                                <button class="btn btn-sm btn-outline-danger" 
+                                        onclick="videoProcessor.deleteJob('${job.job_id}')" 
+                                        title="Delete">
+                                    <i class="fas fa-trash"></i>
+                                </button>
                             ` : ''}
                             ${job.status === 'failed' || job.status === 'cancelled' ? `
                                 <button class="btn btn-sm btn-outline-warning" 
                                         onclick="videoProcessor.retryJob('${job.job_id}')" 
                                         title="Retry">
                                     <i class="fas fa-redo"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger" 
+                                        onclick="videoProcessor.deleteJob('${job.job_id}')" 
+                                        title="Delete">
+                                    <i class="fas fa-trash"></i>
                                 </button>
                             ` : ''}
                             ${job.status === 'processing' || job.status === 'pending' ? `
@@ -540,6 +569,26 @@ class VideoProcessor {
         }).join('');
 
         container.innerHTML = jobsHtml;
+        this.updateBulkDeleteButton();
+    }
+
+    updateBulkDeleteButton() {
+        const checkboxes = document.querySelectorAll('.job-checkbox:checked');
+        const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
+        if (bulkDeleteBtn) {
+            if (checkboxes.length > 0) {
+                bulkDeleteBtn.style.display = 'inline-block';
+                bulkDeleteBtn.innerHTML = `<i class="fas fa-trash"></i> Delete Selected (${checkboxes.length})`;
+            } else {
+                bulkDeleteBtn.innerHTML = '<i class="fas fa-trash"></i> Delete Selected';
+            }
+        }
+    }
+
+    handleBulkDelete() {
+        const checkboxes = document.querySelectorAll('.job-checkbox:checked');
+        const jobIds = Array.from(checkboxes).map(cb => cb.value);
+        this.bulkDeleteJobs(jobIds);
     }
 
     getStatusBadgeColor(status) {
@@ -597,6 +646,64 @@ class VideoProcessor {
             }
         } catch (error) {
             this.showNotification(`Failed to cancel job: ${error.message}`, 'error');
+        }
+    }
+
+    async deleteJob(jobId) {
+        if (!confirm('Are you sure you want to delete this job? This action cannot be undone.')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/job/${jobId}`, {
+                method: 'DELETE'
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                this.showNotification('Job deleted successfully', 'success');
+                setTimeout(() => this.loadRecentJobs(), 500);
+            } else {
+                throw new Error(data.error || 'Delete failed');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to delete job: ${error.message}`, 'error');
+        }
+    }
+
+    async bulkDeleteJobs(jobIds) {
+        if (!jobIds || jobIds.length === 0) {
+            this.showNotification('No jobs selected', 'warning');
+            return;
+        }
+
+        if (!confirm(`Are you sure you want to delete ${jobIds.length} job(s)? This action cannot be undone.`)) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/jobs/bulk-delete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ job_ids: jobIds })
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                this.showNotification(`Successfully deleted ${data.deleted_count} job(s)`, 'success');
+                if (data.failed_count > 0) {
+                    this.showNotification(`${data.failed_count} job(s) failed to delete`, 'warning');
+                }
+                setTimeout(() => this.loadRecentJobs(), 500);
+            } else {
+                throw new Error(data.error || 'Bulk delete failed');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to delete jobs: ${error.message}`, 'error');
         }
     }
 
