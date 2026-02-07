@@ -40,7 +40,7 @@ from src.video_doc.user_management import user_manager, session_manager
 from src.video_doc.enhanced_api_docs import create_api_docs_blueprint
 
 # Import database functionality
-from src.video_doc.database import get_db_session, ProcessingJob as DBProcessingJob, ProcessingStatus, JobManager
+from src.video_doc.database import get_db_session, ProcessingJob as DBProcessingJob, ProcessingStatus, JobManager, ProcessingPreset
 
 # Configure logging
 logging.basicConfig(
@@ -2421,6 +2421,322 @@ def analytics_page():
     """Job analytics dashboard page."""
     user_session = get_current_user_session()
     return render_template('analytics.html', user=user_session)
+
+
+# Processing Preset Endpoints
+@app.route('/api/presets', methods=['GET'])
+@require_auth(Permission.VIEW_JOB)
+def list_presets():
+    """List all available presets."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            # Get user's presets and public presets
+            query = db.query(ProcessingPreset).filter(
+                (ProcessingPreset.user_id == user_id) | (ProcessingPreset.is_public == True)
+            )
+            
+            presets = query.order_by(ProcessingPreset.is_default.desc(), ProcessingPreset.usage_count.desc()).all()
+            
+            preset_list = []
+            for preset in presets:
+                preset_list.append({
+                    'id': str(preset.id),
+                    'name': preset.name,
+                    'description': preset.description,
+                    'config': preset.config,
+                    'is_default': preset.is_default,
+                    'is_public': preset.is_public,
+                    'usage_count': preset.usage_count,
+                    'created_at': preset.created_at.isoformat() if preset.created_at else None,
+                    'last_used_at': preset.last_used_at.isoformat() if preset.last_used_at else None,
+                    'is_owner': preset.user_id == user_id
+                })
+            
+            return jsonify({'presets': preset_list})
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error listing presets: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to list presets'}), 500
+
+
+@app.route('/api/presets', methods=['POST'])
+@require_auth(Permission.CREATE_JOB)
+def create_preset():
+    """Create a new processing preset."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        name = data.get('name', '').strip()
+        if not name:
+            return jsonify({'error': 'Preset name is required'}), 400
+        
+        config = data.get('config', {})
+        if not config:
+            return jsonify({'error': 'Preset configuration is required'}), 400
+        
+        description = data.get('description', '').strip()
+        is_default = data.get('is_default', False)
+        is_public = data.get('is_public', False)
+        
+        db = get_db_session()
+        try:
+            # Check if name already exists for this user
+            existing = db.query(ProcessingPreset).filter(
+                ProcessingPreset.name == name,
+                ProcessingPreset.user_id == user_id
+            ).first()
+            
+            if existing:
+                return jsonify({'error': 'A preset with this name already exists'}), 400
+            
+            # If setting as default, unset other defaults for this user
+            if is_default:
+                db.query(ProcessingPreset).filter(
+                    ProcessingPreset.user_id == user_id,
+                    ProcessingPreset.is_default == True
+                ).update({'is_default': False})
+            
+            # Create new preset
+            preset = ProcessingPreset(
+                user_id=user_id,
+                name=name,
+                description=description,
+                config=config,
+                is_default=is_default,
+                is_public=is_public
+            )
+            
+            db.add(preset)
+            db.commit()
+            
+            logger.info(f"Created preset '{name}' for user {user_id}")
+            
+            return jsonify({
+                'message': 'Preset created successfully',
+                'preset': {
+                    'id': str(preset.id),
+                    'name': preset.name,
+                    'description': preset.description,
+                    'config': preset.config,
+                    'is_default': preset.is_default,
+                    'is_public': preset.is_public
+                }
+            }), 201
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error creating preset: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to create preset'}), 500
+
+
+@app.route('/api/presets/<preset_id>', methods=['GET'])
+@require_auth(Permission.VIEW_JOB)
+def get_preset(preset_id):
+    """Get a specific preset."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            # Convert string to UUID if needed
+            try:
+                preset_uuid = uuid.UUID(preset_id) if isinstance(preset_id, str) else preset_id
+            except ValueError:
+                return jsonify({'error': 'Invalid preset ID format'}), 400
+            
+            preset = db.query(ProcessingPreset).filter(
+                ProcessingPreset.id == preset_uuid,
+                ((ProcessingPreset.user_id == user_id) | (ProcessingPreset.is_public == True))
+            ).first()
+            
+            if not preset:
+                return jsonify({'error': 'Preset not found'}), 404
+            
+            return jsonify({
+                'id': str(preset.id),
+                'name': preset.name,
+                'description': preset.description,
+                'config': preset.config,
+                'is_default': preset.is_default,
+                'is_public': preset.is_public,
+                'usage_count': preset.usage_count,
+                'created_at': preset.created_at.isoformat() if preset.created_at else None,
+                'last_used_at': preset.last_used_at.isoformat() if preset.last_used_at else None
+            })
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error getting preset: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get preset'}), 500
+
+
+@app.route('/api/presets/<preset_id>', methods=['PUT'])
+@require_auth(Permission.CREATE_JOB)
+def update_preset(preset_id):
+    """Update an existing preset."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        db = get_db_session()
+        try:
+            # Convert string to UUID if needed
+            try:
+                preset_uuid = uuid.UUID(preset_id) if isinstance(preset_id, str) else preset_id
+            except ValueError:
+                return jsonify({'error': 'Invalid preset ID format'}), 400
+            
+            preset = db.query(ProcessingPreset).filter(
+                ProcessingPreset.id == preset_uuid,
+                ProcessingPreset.user_id == user_id
+            ).first()
+            
+            if not preset:
+                return jsonify({'error': 'Preset not found or access denied'}), 404
+            
+            # Update fields
+            if 'name' in data:
+                new_name = data['name'].strip()
+                if new_name and new_name != preset.name:
+                    # Check if name already exists
+                    existing = db.query(ProcessingPreset).filter(
+                        ProcessingPreset.name == new_name,
+                        ProcessingPreset.user_id == user_id,
+                        ProcessingPreset.id != preset_id
+                    ).first()
+                    if existing:
+                        return jsonify({'error': 'A preset with this name already exists'}), 400
+                    preset.name = new_name
+            
+            if 'description' in data:
+                preset.description = data['description'].strip()
+            
+            if 'config' in data:
+                preset.config = data['config']
+            
+            if 'is_default' in data:
+                is_default = data['is_default']
+                if is_default and not preset.is_default:
+                    # Unset other defaults
+                    db.query(ProcessingPreset).filter(
+                        ProcessingPreset.user_id == user_id,
+                        ProcessingPreset.is_default == True,
+                        ProcessingPreset.id != preset_id
+                    ).update({'is_default': False})
+                preset.is_default = is_default
+            
+            if 'is_public' in data:
+                preset.is_public = data['is_public']
+            
+            preset.updated_at = datetime.utcnow()
+            db.commit()
+            
+            logger.info(f"Updated preset {preset_id}")
+            
+            return jsonify({'message': 'Preset updated successfully'})
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error updating preset: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to update preset'}), 500
+
+
+@app.route('/api/presets/<preset_id>', methods=['DELETE'])
+@require_auth(Permission.CREATE_JOB)
+def delete_preset(preset_id):
+    """Delete a preset."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            # Convert string to UUID if needed
+            try:
+                preset_uuid = uuid.UUID(preset_id) if isinstance(preset_id, str) else preset_id
+            except ValueError:
+                return jsonify({'error': 'Invalid preset ID format'}), 400
+            
+            preset = db.query(ProcessingPreset).filter(
+                ProcessingPreset.id == preset_uuid,
+                ProcessingPreset.user_id == user_id
+            ).first()
+            
+            if not preset:
+                return jsonify({'error': 'Preset not found or access denied'}), 404
+            
+            db.delete(preset)
+            db.commit()
+            
+            logger.info(f"Deleted preset {preset_id}")
+            
+            return jsonify({'message': 'Preset deleted successfully'})
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error deleting preset: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to delete preset'}), 500
+
+
+@app.route('/api/presets/<preset_id>/use', methods=['POST'])
+@require_auth(Permission.CREATE_JOB)
+def use_preset(preset_id):
+    """Mark a preset as used and increment usage count."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            # Convert string to UUID if needed
+            try:
+                preset_uuid = uuid.UUID(preset_id) if isinstance(preset_id, str) else preset_id
+            except ValueError:
+                return jsonify({'error': 'Invalid preset ID format'}), 400
+            
+            preset = db.query(ProcessingPreset).filter(
+                ProcessingPreset.id == preset_uuid,
+                ((ProcessingPreset.user_id == user_id) | (ProcessingPreset.is_public == True))
+            ).first()
+            
+            if not preset:
+                return jsonify({'error': 'Preset not found'}), 404
+            
+            preset.usage_count += 1
+            preset.last_used_at = datetime.utcnow()
+            db.commit()
+            
+            return jsonify({
+                'message': 'Preset usage recorded',
+                'config': preset.config
+            })
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error recording preset usage: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to record preset usage'}), 500
 
 
 @app.route('/cleanup-stale', methods=['POST'])

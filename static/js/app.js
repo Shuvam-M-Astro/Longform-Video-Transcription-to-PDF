@@ -21,6 +21,7 @@ class VideoProcessor {
         this.setupSocketConnection();
         this.setupEventListeners();
         this.loadRecentJobs();
+        this.loadPresets();
     }
 
     setupSocketConnection() {
@@ -296,6 +297,211 @@ class VideoProcessor {
             min_scene_diff: parseFloat(document.getElementById('minSceneDiff')?.value || 0.45),
             report_style: document.getElementById('reportStyle').value
         };
+    }
+
+    async loadPresets() {
+        try {
+            const response = await fetch('/api/presets');
+            if (response.ok) {
+                const data = await response.json();
+                const selector = document.getElementById('presetSelector');
+                if (selector) {
+                    // Clear existing options except the first one
+                    selector.innerHTML = '<option value="">Load Preset...</option>';
+                    
+                    data.presets.forEach(preset => {
+                        const option = document.createElement('option');
+                        option.value = preset.id;
+                        option.textContent = preset.name + (preset.is_default ? ' (Default)' : '');
+                        if (preset.is_public) {
+                            option.textContent += ' 🌐';
+                        }
+                        selector.appendChild(option);
+                    });
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load presets:', error);
+        }
+    }
+
+    async loadPreset(presetId) {
+        if (!presetId) return;
+        
+        try {
+            const response = await fetch(`/api/presets/${presetId}`);
+            if (response.ok) {
+                const preset = await response.json();
+                this.applyPresetConfig(preset.config);
+                
+                // Record usage
+                await fetch(`/api/presets/${presetId}/use`, { method: 'POST' });
+                
+                this.showNotification(`Loaded preset: ${preset.name}`, 'success');
+            } else {
+                throw new Error('Failed to load preset');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to load preset: ${error.message}`, 'error');
+        }
+    }
+
+    applyPresetConfig(config) {
+        if (config.language) document.getElementById('language').value = config.language;
+        if (config.whisper_model) document.getElementById('whisperModel').value = config.whisper_model;
+        if (config.beam_size !== undefined) {
+            const beamSizeInput = document.getElementById('beamSize');
+            if (beamSizeInput) beamSizeInput.value = config.beam_size;
+        }
+        if (config.transcribe_only !== undefined) document.getElementById('transcribeOnly').checked = config.transcribe_only;
+        if (config.streaming !== undefined) document.getElementById('streaming').checked = config.streaming;
+        if (config.kf_method) document.getElementById('kfMethod').value = config.kf_method;
+        if (config.max_fps !== undefined) {
+            const maxFpsInput = document.getElementById('maxFps');
+            if (maxFpsInput) maxFpsInput.value = config.max_fps;
+        }
+        if (config.min_scene_diff !== undefined) {
+            const minSceneDiffInput = document.getElementById('minSceneDiff');
+            if (minSceneDiffInput) minSceneDiffInput.value = config.min_scene_diff;
+        }
+        if (config.report_style) document.getElementById('reportStyle').value = config.report_style;
+        
+        // Reset selector
+        const selector = document.getElementById('presetSelector');
+        if (selector) selector.value = '';
+    }
+
+    async saveCurrentAsPreset() {
+        const name = prompt('Enter a name for this preset:');
+        if (!name || !name.trim()) return;
+        
+        const description = prompt('Enter a description (optional):') || '';
+        const isDefault = confirm('Set as default preset?');
+        const isPublic = confirm('Make this preset public (shareable)?');
+        
+        const config = this.getProcessingOptions();
+        
+        try {
+            const response = await fetch('/api/presets', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    name: name.trim(),
+                    description: description.trim(),
+                    config: config,
+                    is_default: isDefault,
+                    is_public: isPublic
+                })
+            });
+            
+            const result = await response.json();
+            
+            if (response.ok) {
+                this.showNotification('Preset saved successfully', 'success');
+                await this.loadPresets();
+            } else {
+                throw new Error(result.error || 'Failed to save preset');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to save preset: ${error.message}`, 'error');
+        }
+    }
+
+    async managePresets() {
+        // Simple modal for managing presets
+        const modal = document.createElement('div');
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Manage Presets</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="presetsList"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        document.body.appendChild(modal);
+        const bsModal = new bootstrap.Modal(modal);
+        bsModal.show();
+        
+        // Load presets list
+        try {
+            const response = await fetch('/api/presets');
+            if (response.ok) {
+                const data = await response.json();
+                const listContainer = document.getElementById('presetsList');
+                
+                if (data.presets.length === 0) {
+                    listContainer.innerHTML = '<p class="text-muted">No presets saved yet.</p>';
+                } else {
+                    listContainer.innerHTML = data.presets.map(preset => `
+                        <div class="card mb-2">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <h6 class="mb-1">
+                                            ${this.escapeHtml(preset.name)}
+                                            ${preset.is_default ? '<span class="badge bg-primary ms-2">Default</span>' : ''}
+                                            ${preset.is_public ? '<span class="badge bg-info ms-2">Public</span>' : ''}
+                                        </h6>
+                                        ${preset.description ? `<p class="text-muted small mb-1">${this.escapeHtml(preset.description)}</p>` : ''}
+                                        <small class="text-muted">Used ${preset.usage_count} times</small>
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-primary" onclick="videoProcessor.loadPreset('${preset.id}'); bootstrap.Modal.getInstance(document.querySelector('.modal.show')).hide();">
+                                            <i class="fas fa-download"></i> Load
+                                        </button>
+                                        ${preset.is_owner ? `
+                                            <button class="btn btn-outline-danger" onclick="videoProcessor.deletePreset('${preset.id}')">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load presets:', error);
+        }
+        
+        // Clean up on close
+        modal.addEventListener('hidden.bs.modal', () => {
+            document.body.removeChild(modal);
+        });
+    }
+
+    async deletePreset(presetId) {
+        if (!confirm('Are you sure you want to delete this preset?')) return;
+        
+        try {
+            const response = await fetch(`/api/presets/${presetId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                this.showNotification('Preset deleted successfully', 'success');
+                await this.loadPresets();
+                await this.managePresets(); // Refresh the modal
+            } else {
+                const result = await response.json();
+                throw new Error(result.error || 'Failed to delete preset');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to delete preset: ${error.message}`, 'error');
+        }
     }
 
     handleJobStatusUpdate(data) {

@@ -148,6 +148,36 @@ class QualityCheck(Base):
     )
 
 
+class ProcessingPreset(Base):
+    """Saved processing configuration presets."""
+    __tablename__ = "processing_presets"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(36), nullable=True)  # Optional: link to user if auth is enabled
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    
+    # Processing configuration (same structure as ProcessingJob.config)
+    config = Column(JSON, nullable=False, default=dict)
+    
+    # Metadata
+    is_default = Column(Boolean, default=False)
+    is_public = Column(Boolean, default=False)  # Allow sharing presets
+    usage_count = Column(Integer, default=0)
+    
+    # Timing
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_used_at = Column(DateTime)
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_preset_user', 'user_id'),
+        Index('idx_preset_name', 'name'),
+        Index('idx_preset_public', 'is_public'),
+    )
+
+
 class SystemMetrics(Base):
     """System performance and resource metrics."""
     __tablename__ = "system_metrics"
