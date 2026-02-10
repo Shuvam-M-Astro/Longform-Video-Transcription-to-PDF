@@ -24,6 +24,9 @@ from dataclasses import asdict
 import uuid
 import re
 from urllib.parse import urlparse
+import requests
+import hmac
+import hashlib
 
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from flask_socketio import SocketIO, emit
@@ -40,7 +43,7 @@ from src.video_doc.user_management import user_manager, session_manager
 from src.video_doc.enhanced_api_docs import create_api_docs_blueprint
 
 # Import database functionality
-from src.video_doc.database import get_db_session, ProcessingJob as DBProcessingJob, ProcessingStatus, JobManager, ProcessingPreset
+from src.video_doc.database import get_db_session, ProcessingJob as DBProcessingJob, ProcessingStatus, JobManager, ProcessingPreset, Webhook, WebhookDelivery
 
 # Configure logging
 logging.basicConfig(
@@ -274,6 +277,14 @@ class ProcessingJob:
             self.start_time = time.time()
             self._update_db_status()
             self._emit_status_update()
+            
+            # Trigger webhooks for job started
+            trigger_webhooks(self.job_id, 'job.started', {
+                'job_id': self.job_id,
+                'status': 'processing',
+                'job_type': self.job_type,
+                'identifier': self.identifier
+            })
             
             # Prepare arguments for main processing
             args = self._prepare_arguments()
@@ -657,6 +668,16 @@ class ProcessingJob:
             self._update_db_status()
             self._emit_status_update()
             
+            # Trigger webhooks for job completion
+            trigger_webhooks(self.job_id, 'job.completed', {
+                'job_id': self.job_id,
+                'status': 'completed',
+                'job_type': self.job_type,
+                'identifier': self.identifier,
+                'duration': self.end_time - self.start_time if self.start_time else None,
+                'output_files': self.output_files
+            })
+            
             # Automatically index transcript for search (async, non-blocking)
             try:
                 from src.video_doc.search import get_search_service
@@ -691,6 +712,16 @@ class ProcessingJob:
             self._update_db_status()
             self._emit_status_update()
             logger.error(f"Processing error for job {self.job_id}: {e}", exc_info=True)
+            
+            # Trigger webhooks for job failure
+            trigger_webhooks(self.job_id, 'job.failed', {
+                'job_id': self.job_id,
+                'status': 'failed',
+                'job_type': self.job_type,
+                'identifier': self.identifier,
+                'error_message': str(e),
+                'duration': self.end_time - self.start_time if self.start_time else None
+            })
             
             # Clean up on failure
             try:
@@ -2737,6 +2768,384 @@ def use_preset(preset_id):
     except Exception as e:
         logger.error(f"Error recording preset usage: {e}", exc_info=True)
         return jsonify({'error': 'Failed to record preset usage'}), 500
+
+
+# Webhook Delivery Functions
+def trigger_webhooks(job_id: str, event_type: str, payload: Dict[str, Any]):
+    """Trigger webhooks for a job event."""
+    try:
+        db = get_db_session()
+        try:
+            # Find active webhooks subscribed to this event
+            webhooks = db.query(Webhook).filter(
+                Webhook.is_active == True
+            ).all()
+            
+            for webhook in webhooks:
+                # Check if webhook is subscribed to this event
+                if event_type not in (webhook.events or []):
+                    continue
+                
+                # Deliver webhook in background thread
+                delivery_thread = threading.Thread(
+                    target=deliver_webhook,
+                    args=(webhook.id, job_id, event_type, payload, webhook),
+                    daemon=True
+                )
+                delivery_thread.start()
+                
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Error triggering webhooks for job {job_id}: {e}", exc_info=True)
+
+
+def deliver_webhook(webhook_id: uuid.UUID, job_id: str, event_type: str, payload: Dict[str, Any], webhook: Webhook):
+    """Deliver a webhook with retry logic."""
+    db = get_db_session()
+    try:
+        max_attempts = webhook.retry_count or 3
+        timeout = webhook.timeout_seconds or 30
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Prepare payload
+                webhook_payload = {
+                    'event': event_type,
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'data': payload
+                }
+                
+                # Add signature if secret is configured
+                headers = dict(webhook.headers or {})
+                headers['Content-Type'] = 'application/json'
+                headers['User-Agent'] = 'Video-Doc-Builder/1.0'
+                
+                if webhook.secret:
+                    signature = hmac.new(
+                        webhook.secret.encode('utf-8'),
+                        json.dumps(webhook_payload).encode('utf-8'),
+                        hashlib.sha256
+                    ).hexdigest()
+                    headers['X-Webhook-Signature'] = f'sha256={signature}'
+                
+                # Make HTTP request
+                response = requests.post(
+                    webhook.url,
+                    json=webhook_payload,
+                    headers=headers,
+                    timeout=timeout
+                )
+                
+                # Record delivery
+                delivery = WebhookDelivery(
+                    webhook_id=webhook_id,
+                    job_id=job_id,
+                    event_type=event_type,
+                    status='success' if 200 <= response.status_code < 300 else 'failed',
+                    status_code=response.status_code,
+                    response_body=response.text[:1000] if response.text else None,
+                    attempt_number=attempt,
+                    max_attempts=max_attempts,
+                    delivered_at=datetime.utcnow()
+                )
+                db.add(delivery)
+                
+                # Update webhook statistics
+                if 200 <= response.status_code < 300:
+                    webhook.success_count = (webhook.success_count or 0) + 1
+                    webhook.last_success_at = datetime.utcnow()
+                    webhook.last_triggered_at = datetime.utcnow()
+                    db.commit()
+                    logger.info(f"Webhook {webhook_id} delivered successfully for job {job_id}")
+                    return
+                else:
+                    error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                    
+            except requests.exceptions.Timeout:
+                error_msg = f"Request timeout after {timeout}s"
+            except requests.exceptions.RequestException as e:
+                error_msg = str(e)[:500]
+            except Exception as e:
+                error_msg = f"Unexpected error: {str(e)[:500]}"
+            
+            # Record failed attempt
+            if attempt < max_attempts:
+                next_retry = datetime.utcnow() + timedelta(seconds=webhook.retry_delay_seconds or 5)
+                delivery = WebhookDelivery(
+                    webhook_id=webhook_id,
+                    job_id=job_id,
+                    event_type=event_type,
+                    status='pending',
+                    error_message=error_msg,
+                    attempt_number=attempt,
+                    max_attempts=max_attempts,
+                    next_retry_at=next_retry
+                )
+                db.add(delivery)
+                db.commit()
+                
+                # Wait before retry
+                time.sleep(webhook.retry_delay_seconds or 5)
+            else:
+                # Final failure
+                delivery = WebhookDelivery(
+                    webhook_id=webhook_id,
+                    job_id=job_id,
+                    event_type=event_type,
+                    status='failed',
+                    error_message=error_msg,
+                    attempt_number=attempt,
+                    max_attempts=max_attempts,
+                    delivered_at=datetime.utcnow()
+                )
+                db.add(delivery)
+                
+                # Update webhook statistics
+                webhook.failure_count = (webhook.failure_count or 0) + 1
+                webhook.last_failure_at = datetime.utcnow()
+                webhook.last_error = error_msg
+                webhook.last_triggered_at = datetime.utcnow()
+                db.commit()
+                logger.warning(f"Webhook {webhook_id} failed after {max_attempts} attempts for job {job_id}: {error_msg}")
+                
+    finally:
+        db.close()
+
+
+# Webhook Management Endpoints
+@app.route('/api/webhooks', methods=['GET'])
+@require_auth(Permission.VIEW_JOB)
+def list_webhooks():
+    """List all webhooks for the current user."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            webhooks = db.query(Webhook).filter(
+                Webhook.user_id == user_id
+            ).order_by(Webhook.created_at.desc()).all()
+            
+            webhook_list = []
+            for webhook in webhooks:
+                webhook_list.append({
+                    'id': str(webhook.id),
+                    'name': webhook.name,
+                    'url': webhook.url,
+                    'events': webhook.events or [],
+                    'is_active': webhook.is_active,
+                    'success_count': webhook.success_count or 0,
+                    'failure_count': webhook.failure_count or 0,
+                    'last_triggered_at': webhook.last_triggered_at.isoformat() if webhook.last_triggered_at else None,
+                    'created_at': webhook.created_at.isoformat() if webhook.created_at else None
+                })
+            
+            return jsonify({'webhooks': webhook_list})
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error listing webhooks: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to list webhooks'}), 500
+
+
+@app.route('/api/webhooks', methods=['POST'])
+@require_auth(Permission.CREATE_JOB)
+def create_webhook():
+    """Create a new webhook."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        name = data.get('name', '').strip()
+        url = data.get('url', '').strip()
+        events = data.get('events', [])
+        
+        if not name:
+            return jsonify({'error': 'Webhook name is required'}), 400
+        if not url:
+            return jsonify({'error': 'Webhook URL is required'}), 400
+        if not events:
+            return jsonify({'error': 'At least one event must be subscribed'}), 400
+        
+        # Validate URL
+        try:
+            parsed = urlparse(url)
+            if not parsed.scheme or not parsed.netloc:
+                return jsonify({'error': 'Invalid URL format'}), 400
+        except:
+            return jsonify({'error': 'Invalid URL format'}), 400
+        
+        db = get_db_session()
+        try:
+            webhook = Webhook(
+                user_id=user_id,
+                name=name,
+                url=url,
+                events=events,
+                secret=data.get('secret', '').strip() or None,
+                is_active=data.get('is_active', True),
+                timeout_seconds=data.get('timeout_seconds', 30),
+                retry_count=data.get('retry_count', 3),
+                retry_delay_seconds=data.get('retry_delay_seconds', 5),
+                headers=data.get('headers', {})
+            )
+            
+            db.add(webhook)
+            db.commit()
+            
+            logger.info(f"Created webhook '{name}' for user {user_id}")
+            
+            return jsonify({
+                'message': 'Webhook created successfully',
+                'webhook': {
+                    'id': str(webhook.id),
+                    'name': webhook.name,
+                    'url': webhook.url,
+                    'events': webhook.events
+                }
+            }), 201
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error creating webhook: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to create webhook'}), 500
+
+
+@app.route('/api/webhooks/<webhook_id>', methods=['DELETE'])
+@require_auth(Permission.CREATE_JOB)
+def delete_webhook(webhook_id):
+    """Delete a webhook."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            try:
+                webhook_uuid = uuid.UUID(webhook_id) if isinstance(webhook_id, str) else webhook_id
+            except ValueError:
+                return jsonify({'error': 'Invalid webhook ID format'}), 400
+            
+            webhook = db.query(Webhook).filter(
+                Webhook.id == webhook_uuid,
+                Webhook.user_id == user_id
+            ).first()
+            
+            if not webhook:
+                return jsonify({'error': 'Webhook not found or access denied'}), 404
+            
+            db.delete(webhook)
+            db.commit()
+            
+            logger.info(f"Deleted webhook {webhook_id}")
+            
+            return jsonify({'message': 'Webhook deleted successfully'})
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error deleting webhook: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to delete webhook'}), 500
+
+
+@app.route('/api/webhooks/<webhook_id>/toggle', methods=['POST'])
+@require_auth(Permission.CREATE_JOB)
+def toggle_webhook(webhook_id):
+    """Toggle webhook active status."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            try:
+                webhook_uuid = uuid.UUID(webhook_id) if isinstance(webhook_id, str) else webhook_id
+            except ValueError:
+                return jsonify({'error': 'Invalid webhook ID format'}), 400
+            
+            webhook = db.query(Webhook).filter(
+                Webhook.id == webhook_uuid,
+                Webhook.user_id == user_id
+            ).first()
+            
+            if not webhook:
+                return jsonify({'error': 'Webhook not found or access denied'}), 404
+            
+            webhook.is_active = not webhook.is_active
+            db.commit()
+            
+            return jsonify({
+                'message': 'Webhook status updated',
+                'is_active': webhook.is_active
+            })
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error toggling webhook: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to toggle webhook'}), 500
+
+
+@app.route('/api/webhooks/<webhook_id>/deliveries', methods=['GET'])
+@require_auth(Permission.VIEW_JOB)
+def get_webhook_deliveries(webhook_id):
+    """Get delivery history for a webhook."""
+    try:
+        user_session = get_current_user_session()
+        user_id = user_session.user_id if user_session else None
+        
+        db = get_db_session()
+        try:
+            try:
+                webhook_uuid = uuid.UUID(webhook_id) if isinstance(webhook_id, str) else webhook_id
+            except ValueError:
+                return jsonify({'error': 'Invalid webhook ID format'}), 400
+            
+            # Verify webhook ownership
+            webhook = db.query(Webhook).filter(
+                Webhook.id == webhook_uuid,
+                Webhook.user_id == user_id
+            ).first()
+            
+            if not webhook:
+                return jsonify({'error': 'Webhook not found or access denied'}), 404
+            
+            # Get recent deliveries
+            limit = int(request.args.get('limit', 50))
+            deliveries = db.query(WebhookDelivery).filter(
+                WebhookDelivery.webhook_id == webhook_uuid
+            ).order_by(WebhookDelivery.triggered_at.desc()).limit(limit).all()
+            
+            delivery_list = []
+            for delivery in deliveries:
+                delivery_list.append({
+                    'id': str(delivery.id),
+                    'job_id': delivery.job_id,
+                    'event_type': delivery.event_type,
+                    'status': delivery.status,
+                    'status_code': delivery.status_code,
+                    'attempt_number': delivery.attempt_number,
+                    'error_message': delivery.error_message,
+                    'triggered_at': delivery.triggered_at.isoformat() if delivery.triggered_at else None,
+                    'delivered_at': delivery.delivered_at.isoformat() if delivery.delivered_at else None
+                })
+            
+            return jsonify({'deliveries': delivery_list})
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error getting webhook deliveries: {e}", exc_info=True)
+        return jsonify({'error': 'Failed to get webhook deliveries'}), 500
 
 
 @app.route('/cleanup-stale', methods=['POST'])

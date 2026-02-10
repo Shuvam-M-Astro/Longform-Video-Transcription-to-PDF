@@ -178,6 +178,80 @@ class ProcessingPreset(Base):
     )
 
 
+class Webhook(Base):
+    """Webhook configurations for job notifications."""
+    __tablename__ = "webhooks"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(36), nullable=True)  # Optional: link to user if auth is enabled
+    name = Column(String(100), nullable=False)
+    url = Column(Text, nullable=False)
+    secret = Column(String(255))  # Optional secret for HMAC signature
+    
+    # Event subscriptions
+    events = Column(JSON, nullable=False, default=list)  # ['job.completed', 'job.failed', 'job.started']
+    
+    # Configuration
+    is_active = Column(Boolean, default=True)
+    timeout_seconds = Column(Integer, default=30)
+    retry_count = Column(Integer, default=3)
+    retry_delay_seconds = Column(Integer, default=5)
+    
+    # Headers (custom headers to include)
+    headers = Column(JSON, default=dict)
+    
+    # Statistics
+    success_count = Column(Integer, default=0)
+    failure_count = Column(Integer, default=0)
+    last_triggered_at = Column(DateTime)
+    last_success_at = Column(DateTime)
+    last_failure_at = Column(DateTime)
+    last_error = Column(Text)
+    
+    # Timing
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_webhook_user', 'user_id'),
+        Index('idx_webhook_active', 'is_active'),
+    )
+
+
+class WebhookDelivery(Base):
+    """Webhook delivery attempts and results."""
+    __tablename__ = "webhook_deliveries"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    webhook_id = Column(UUID(as_uuid=True), ForeignKey('webhooks.id'), nullable=False)
+    job_id = Column(String(100), nullable=False)
+    event_type = Column(String(50), nullable=False)  # 'job.completed', 'job.failed', etc.
+    
+    # Delivery details
+    status = Column(String(20), nullable=False)  # 'pending', 'success', 'failed'
+    status_code = Column(Integer)  # HTTP status code
+    response_body = Column(Text)
+    error_message = Column(Text)
+    
+    # Retry information
+    attempt_number = Column(Integer, default=1)
+    max_attempts = Column(Integer, default=3)
+    
+    # Timing
+    triggered_at = Column(DateTime, default=datetime.utcnow)
+    delivered_at = Column(DateTime)
+    next_retry_at = Column(DateTime)
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_delivery_webhook', 'webhook_id'),
+        Index('idx_delivery_job', 'job_id'),
+        Index('idx_delivery_status', 'status'),
+        Index('idx_delivery_triggered', 'triggered_at'),
+    )
+
+
 class SystemMetrics(Base):
     """System performance and resource metrics."""
     __tablename__ = "system_metrics"

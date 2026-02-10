@@ -504,6 +504,168 @@ class VideoProcessor {
         }
     }
 
+    async showWebhooksModal() {
+        const modal = document.createElement('div');
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Webhook Notifications</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h6 class="mb-0">Configured Webhooks</h6>
+                            <button class="btn btn-primary btn-sm" onclick="videoProcessor.showCreateWebhookForm()">
+                                <i class="fas fa-plus"></i> Add Webhook
+                            </button>
+                        </div>
+                        <div id="webhooksList"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        document.body.appendChild(modal);
+        const bsModal = new bootstrap.Modal(modal);
+        bsModal.show();
+        
+        await this.loadWebhooks();
+        
+        modal.addEventListener('hidden.bs.modal', () => {
+            document.body.removeChild(modal);
+        });
+    }
+
+    async loadWebhooks() {
+        try {
+            const response = await fetch('/api/webhooks');
+            if (response.ok) {
+                const data = await response.json();
+                const listContainer = document.getElementById('webhooksList');
+                
+                if (data.webhooks.length === 0) {
+                    listContainer.innerHTML = '<p class="text-muted">No webhooks configured. Click "Add Webhook" to create one.</p>';
+                } else {
+                    listContainer.innerHTML = data.webhooks.map(webhook => `
+                        <div class="card mb-2">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div class="flex-grow-1">
+                                        <h6 class="mb-1">
+                                            ${this.escapeHtml(webhook.name)}
+                                            ${webhook.is_active ? '<span class="badge bg-success ms-2">Active</span>' : '<span class="badge bg-secondary ms-2">Inactive</span>'}
+                                        </h6>
+                                        <p class="text-muted small mb-1"><code>${this.escapeHtml(webhook.url)}</code></p>
+                                        <div class="small">
+                                            <strong>Events:</strong> ${(webhook.events || []).join(', ')}<br>
+                                            <strong>Stats:</strong> ${webhook.success_count} success, ${webhook.failure_count} failed
+                                        </div>
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-primary" onclick="videoProcessor.toggleWebhook('${webhook.id}')" title="${webhook.is_active ? 'Deactivate' : 'Activate'}">
+                                            <i class="fas fa-${webhook.is_active ? 'pause' : 'play'}"></i>
+                                        </button>
+                                        <button class="btn btn-outline-danger" onclick="videoProcessor.deleteWebhook('${webhook.id}')" title="Delete">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load webhooks:', error);
+        }
+    }
+
+    showCreateWebhookForm() {
+        const name = prompt('Webhook name:');
+        if (!name) return;
+        
+        const url = prompt('Webhook URL:');
+        if (!url) return;
+        
+        const eventsInput = prompt('Events (comma-separated: job.started, job.completed, job.failed):', 'job.completed, job.failed');
+        const events = eventsInput ? eventsInput.split(',').map(e => e.trim()) : ['job.completed'];
+        
+        const secret = prompt('Secret (optional, for HMAC signature):') || '';
+        
+        this.createWebhook({
+            name: name,
+            url: url,
+            events: events,
+            secret: secret
+        });
+    }
+
+    async createWebhook(data) {
+        try {
+            const response = await fetch('/api/webhooks', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            });
+            
+            const result = await response.json();
+            
+            if (response.ok) {
+                this.showNotification('Webhook created successfully', 'success');
+                await this.loadWebhooks();
+            } else {
+                throw new Error(result.error || 'Failed to create webhook');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to create webhook: ${error.message}`, 'error');
+        }
+    }
+
+    async toggleWebhook(webhookId) {
+        try {
+            const response = await fetch(`/api/webhooks/${webhookId}/toggle`, {
+                method: 'POST'
+            });
+            
+            if (response.ok) {
+                this.showNotification('Webhook status updated', 'success');
+                await this.loadWebhooks();
+            } else {
+                const result = await response.json();
+                throw new Error(result.error || 'Failed to toggle webhook');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to toggle webhook: ${error.message}`, 'error');
+        }
+    }
+
+    async deleteWebhook(webhookId) {
+        if (!confirm('Are you sure you want to delete this webhook?')) return;
+        
+        try {
+            const response = await fetch(`/api/webhooks/${webhookId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                this.showNotification('Webhook deleted successfully', 'success');
+                await this.loadWebhooks();
+            } else {
+                const result = await response.json();
+                throw new Error(result.error || 'Failed to delete webhook');
+            }
+        } catch (error) {
+            this.showNotification(`Failed to delete webhook: ${error.message}`, 'error');
+        }
+    }
+
     handleJobStatusUpdate(data) {
         if (data.job_id !== this.currentJobId) return;
 
