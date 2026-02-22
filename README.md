@@ -250,8 +250,69 @@ keyframes:
   max_frames: 0
 ```
 
+## Search & Indexing
+
+The tool automatically indexes transcripts for cross-language search after processing. You can manage and search indexes using the command-line interface.
+
+### Check Indexing Status
+
+Check if a processed video has been indexed:
+
+```cmd
+python search_cli.py status --output-dir ./outputs/run1
+```
+
+Or using a job ID:
+
+```cmd
+python search_cli.py status --job-id <job-uuid>
+```
+
+### Manually Index a Transcript
+
+If indexing failed or you want to re-index:
+
+```cmd
+python search_cli.py index --output-dir ./outputs/run1
+```
+
+### Search Transcripts
+
+Search across all indexed transcripts:
+
+```cmd
+# Basic search
+python search_cli.py search --query "machine learning"
+
+# Search with more results and lower score threshold
+python search_cli.py search --query "deep learning" --limit 20 --min-score 0.3
+
+# Search with translation to Spanish
+python search_cli.py search --query "neural networks" --target-language es
+
+# Export results to JSON
+python search_cli.py search --query "AI" --output results.json --format json
+
+# Use keyword search mode
+python search_cli.py search --query "python programming" --mode keyword
+
+# Hybrid search (combines semantic and keyword)
+python search_cli.py search --query "data science" --mode hybrid
+```
+
+### List Indexed Jobs
+
+View all jobs that have been indexed:
+
+```cmd
+python search_cli.py list
+```
+
+For more details on search functionality, see [CROSS_LANGUAGE_SEARCH_README.md](CROSS_LANGUAGE_SEARCH_README.md).
+
 ## Troubleshooting
 - Stuck on keyframes: switch to `--kf-method iframe` or `--kf-method interval --kf-interval-sec 10`.
 - Slow transcription on CPU: use `--whisper-model small` and `--beam-size 1` (or enable GPU).
 - CUDA errors: script auto-falls back to CPU; install correct PyTorch CUDA build for GPU.
 - Batch processing issues: check logs in `batch_log.txt` and use `--parallel 1` for debugging.
+- Search returns no results: check indexing status with `python search_cli.py status`, try lowering `--min-score`, or use `--mode keyword` for exact matches.
