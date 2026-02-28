@@ -457,6 +457,29 @@ class AuthenticationManager:
                 severity=ErrorSeverity.MEDIUM
             )
     
+    def list_api_keys(self, user_id: str) -> List[Dict[str, Any]]:
+        """List API keys for a user (metadata only; never returns the actual key)."""
+        try:
+            with get_db_session() as session:
+                records = session.query(APIKey).filter(
+                    APIKey.user_id == user_id
+                ).order_by(APIKey.created_at.desc()).all()
+                keys = []
+                for r in records:
+                    keys.append({
+                        'id': r.id,
+                        'key_name': r.key_name,
+                        'created_at': r.created_at.isoformat() if r.created_at else None,
+                        'expires_at': r.expires_at.isoformat() if r.expires_at else None,
+                        'last_used': r.last_used.isoformat() if r.last_used else None,
+                        'permissions': [p.strip() for p in (r.permissions or '').split(',') if p.strip()],
+                        'is_active': r.is_active,
+                    })
+                return keys
+        except Exception as e:
+            self.logger.error(f"Failed to list API keys for user {user_id}: {str(e)}")
+            return []
+
     def validate_api_key(self, api_key: str) -> Optional[Dict[str, Any]]:
         """Validate API key and return user info."""
         try:

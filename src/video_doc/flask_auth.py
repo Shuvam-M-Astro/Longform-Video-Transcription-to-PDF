@@ -346,13 +346,11 @@ def create_user_endpoints(app):
     @app.route('/auth/api-keys', methods=['GET'])
     @require_auth(Permission.MANAGE_USERS)
     def list_api_keys():
-        """List user's API keys."""
+        """List user's API keys (metadata only; the actual key is never returned)."""
         try:
             user_session = get_current_user_session()
-            
-            # This would need to be implemented in the auth manager
-            # For now, return empty list
-            return jsonify({'api_keys': []})
+            api_keys = auth_manager.list_api_keys(user_session.user_id)
+            return jsonify({'api_keys': api_keys})
             
         except Exception as e:
             logger.error(f"List API keys error: {str(e)}")
