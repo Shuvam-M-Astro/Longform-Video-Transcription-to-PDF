@@ -49,6 +49,90 @@ python -c "from faster_whisper import WhisperModel as W; W('tiny', device='cuda'
 python main.py --url "<VIDEO_URL>" --out ".\outputs\run1" --language auto
 ```
 
+## Testing
+
+The project includes a comprehensive test suite to ensure code quality and reliability.
+
+### Running Tests
+
+```bash
+# Run all tests
+python run_tests.py
+
+# Or use pytest directly
+pytest
+
+# Run with coverage report
+pytest --cov=src --cov-report=html
+
+# Run specific test file
+pytest tests/test_database.py
+
+# Run tests in parallel
+pytest -n auto
+```
+
+### Test Structure
+
+- `tests/test_database.py` - Database model tests
+- `tests/test_progress.py` - Progress tracking tests  
+- `tests/test_data_validation.py` - Data validation tests
+- `tests/conftest.py` - Test fixtures and configuration
+
+## CI/CD
+
+The project uses GitHub Actions for continuous integration and deployment.
+
+### Automated Checks
+
+- **Testing**: Runs pytest on multiple Python versions (3.8-3.11)
+- **Code Quality**: Black, isort, flake8, and mypy checks
+- **Coverage**: Code coverage reporting with Codecov
+
+### Workflows
+
+- `ci.yml` - Runs tests and linting on push/PR to main/develop branches
+
+## Development
+
+### Quick Commands
+
+Use the provided Makefile for common development tasks:
+
+```bash
+# Install dependencies
+make install-dev
+
+# Run tests
+make test
+
+# Run tests with coverage
+make test-cov
+
+# Format code
+make format
+
+# Run linting
+make lint
+
+# Clean up
+make clean
+
+# Run development server
+make dev
+
+# Full setup
+make setup
+```
+
+### Development Setup
+
+1. Clone the repository
+2. Run `make setup` to install dependencies and set up pre-commit hooks
+3. Copy `.env.example` to `.env` and configure your environment
+4. Run `make db-init` to initialize the database
+5. Run `make dev` to start the development server
+
 ## Interactive UI (Streamlit)
 
 If you prefer to review/edit the transcript, pick keyframes/visuals, and export the PDF without using the CLI, launch the UI:

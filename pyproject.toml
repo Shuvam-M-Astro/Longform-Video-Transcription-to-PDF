@@ -99,6 +99,7 @@ omit = [
     "*/build/*",
     "*/dist/*",
 ]
+]
 
 [tool.coverage.report]
 exclude_lines = [
