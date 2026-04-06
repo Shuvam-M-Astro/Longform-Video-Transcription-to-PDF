@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from flask_socketio import SocketIO, emit
 import yaml
+from src.video_doc.frames import list_keyframe_files
 
 # Import health check functionality
 from src.video_doc.health_checks import get_health_status, get_health_summary, get_service_health
@@ -541,7 +542,7 @@ class ProcessingJob:
                 # Keyframes
                 if not args.transcribe_only:
                     self._emit_step_update("Extracting keyframes from file...")
-                    existing_frames = sorted(frames_dir.glob("frame_*.jpg"))
+                    existing_frames = list_keyframe_files(frames_dir, args.frame_format)
                     if existing_frames and getattr(args, "resume", False):
                         keyframe_paths = existing_frames
                         self._emit_step_update(f"Reusing existing keyframes: {len(keyframe_paths)}")

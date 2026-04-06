@@ -12,6 +12,34 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 
+SUPPORTED_FRAME_FORMATS = ("jpg", "png", "webp")
+
+
+def list_keyframe_files(frames_dir: Path, output_format: str | None = None) -> List[Path]:
+    """Return saved keyframes in a stable order.
+
+    When output_format is provided, only that extension is returned. Otherwise,
+    all supported keyframe formats are included.
+    """
+    frames_dir = Path(frames_dir)
+
+    if output_format:
+        extensions = [(output_format or "jpg").lower().lstrip(".")]
+    else:
+        extensions = list(SUPPORTED_FRAME_FORMATS)
+
+    normalized_extensions = []
+    for ext in extensions:
+        normalized = "jpg" if ext == "jpeg" else ext
+        if normalized in SUPPORTED_FRAME_FORMATS and normalized not in normalized_extensions:
+            normalized_extensions.append(normalized)
+
+    keyframes: List[Path] = []
+    for ext in normalized_extensions:
+        keyframes.extend(sorted(frames_dir.glob(f"frame_*.{ext}")))
+    return keyframes
+
+
 def _probe_duration_seconds(video_path: Path) -> float | None:
     try:
         info = ffmpeg.probe(str(video_path))

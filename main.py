@@ -9,7 +9,7 @@ from pathlib import Path
 from src.video_doc.download import download_video
 from src.video_doc.audio import extract_audio_wav
 from src.video_doc.transcribe import transcribe_audio
-from src.video_doc.frames import extract_keyframes, build_contact_sheet
+from src.video_doc.frames import extract_keyframes, build_contact_sheet, list_keyframe_files
 from src.video_doc.classify import classify_frames
 from src.video_doc.pdf import build_pdf_report
 from src.video_doc.stream import (
@@ -319,7 +319,7 @@ def main() -> None:
                 f"min_scene_diff={args.min_scene_diff} interval_sec={args.kf_interval_sec}",
                 flush=True,
             )
-            existing_frames = sorted(frames_dir.glob("frame_*.jpg"))
+            existing_frames = list_keyframe_files(frames_dir, args.frame_format)
             if existing_frames and getattr(args, "resume", False):
                 keyframe_paths = existing_frames
                 print(f"Reusing existing keyframes: {len(keyframe_paths)}", flush=True)

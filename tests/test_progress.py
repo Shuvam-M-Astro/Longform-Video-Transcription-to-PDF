@@ -4,6 +4,7 @@ Tests for progress tracking functionality.
 
 import pytest
 from src.video_doc.progress import PipelineProgress, make_console_progress_printer
+from src.video_doc.frames import list_keyframe_files
 
 
 class TestProgress:
@@ -103,3 +104,18 @@ class TestProgress:
             printer(100.0, "Complete")
         except Exception as e:
             pytest.fail(f"Console printer raised an exception: {e}")
+
+    def test_list_keyframe_files_uses_requested_format(self, tmp_path):
+        """Resume logic should reuse the configured frame format, not just JPG."""
+        frames_dir = tmp_path / "keyframes"
+        frames_dir.mkdir()
+        png_frame = frames_dir / "frame_000001.png"
+        jpg_frame = frames_dir / "frame_000001.jpg"
+        webp_frame = frames_dir / "frame_000001.webp"
+        png_frame.write_bytes(b"png")
+        jpg_frame.write_bytes(b"jpg")
+        webp_frame.write_bytes(b"webp")
+
+        assert list_keyframe_files(frames_dir, "png") == [png_frame]
+        assert list_keyframe_files(frames_dir, "jpeg") == [jpg_frame]
+        assert list_keyframe_files(frames_dir) == [jpg_frame, png_frame, webp_frame]

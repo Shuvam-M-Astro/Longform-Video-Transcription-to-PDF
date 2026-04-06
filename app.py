@@ -19,7 +19,7 @@ from src.video_doc.stream import (
 from src.video_doc.download import download_video
 from src.video_doc.audio import extract_audio_wav
 from src.video_doc.transcribe import transcribe_audio
-from src.video_doc.frames import extract_keyframes, build_contact_sheet
+from src.video_doc.frames import extract_keyframes, build_contact_sheet, list_keyframe_files
 from src.video_doc.classify import classify_frames
 from src.video_doc.pdf import build_pdf_report
 
@@ -182,7 +182,7 @@ with right:
     st.subheader("Keyframes & Preview")
     grid = st.container()
     if frames_dir.exists():
-        imgs = sorted(frames_dir.glob("frame_*.jpg")) + sorted(frames_dir.glob("frame_*.png")) + sorted(frames_dir.glob("frame_*.webp"))
+        imgs = list_keyframe_files(frames_dir)
     else:
         imgs = []
     if imgs:
