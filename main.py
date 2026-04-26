@@ -6,6 +6,7 @@ import threading
 import uuid
 from pathlib import Path
 
+from src.video_doc import __version__
 from src.video_doc.download import download_video
 from src.video_doc.audio import extract_audio_wav
 from src.video_doc.transcribe import transcribe_audio
@@ -23,18 +24,27 @@ from src.video_doc.progress import PipelineProgress, make_console_progress_print
 from yt_dlp import YoutubeDL
 
 
+# Output directory layout used across the pipeline. Centralising the list
+# keeps ``ensure_dirs`` and resume logic in sync.
+_OUTPUT_SUBDIRS = (
+    "transcript",
+    "frames/keyframes",
+    "classified/code",
+    "classified/plots",
+    "classified/images",
+    "snippets/code",
+)
+
+
 def ensure_dirs(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "transcript").mkdir(parents=True, exist_ok=True)
-    (output_dir / "frames" / "keyframes").mkdir(parents=True, exist_ok=True)
-    (output_dir / "classified" / "code").mkdir(parents=True, exist_ok=True)
-    (output_dir / "classified" / "plots").mkdir(parents=True, exist_ok=True)
-    (output_dir / "classified" / "images").mkdir(parents=True, exist_ok=True)
-    (output_dir / "snippets" / "code").mkdir(parents=True, exist_ok=True)
+    for sub in _OUTPUT_SUBDIRS:
+        (output_dir / sub).mkdir(parents=True, exist_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a PDF document from a long-form video")
+    parser.add_argument("--version", action="version", version=f"video-doc {__version__}")
     parser.add_argument("--url", type=str, required=False, help="Video URL")
     parser.add_argument("--video", type=str, default=None, help="Path to a local video file (e.g., .mp4, .mkv)")
     parser.add_argument("--out", type=str, default="./outputs/run", help="Output directory")
@@ -89,6 +99,16 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.url and not args.video:
         parser.error("You must provide either --url or --video")
+    if args.url and args.video:
+        parser.error("--url and --video are mutually exclusive; pick one source")
+    if not (1 <= args.frame_quality <= 100):
+        parser.error("--frame-quality must be between 1 and 100")
+    if args.whisper_num_workers < 1:
+        parser.error("--whisper-num-workers must be >= 1")
+    if not (0.0 <= args.min_scene_diff <= 1.0):
+        parser.error("--min-scene-diff must be between 0.0 and 1.0")
+    if args.max_fps <= 0:
+        parser.error("--max-fps must be > 0")
     return args
 
 
@@ -193,10 +213,8 @@ def main() -> None:
 
     # Overall pipeline progress (weights roughly proportional to average time)
     # Download 20, Audio 10, Frames 20, Transcribe 40, Classify 5, PDF 5
-    progress = PipelineProgress(
-        total_weight=100.0,
-        on_change=make_console_progress_printer(),
-    )
+    progress = PipelineProgress(total_weight=100.0)
+    progress.on_change = make_console_progress_printer(progress=progress)
 
     keyframe_paths = []
 
