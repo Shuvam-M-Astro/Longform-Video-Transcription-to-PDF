@@ -8,8 +8,40 @@ Helper functions and utilities for batch video processing.
 import json
 import csv
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Iterable, Optional
 from datetime import datetime
+
+
+DEFAULT_VIDEO_EXTENSIONS: List[str] = [
+    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".flv", ".wmv",
+]
+
+
+def _normalize_extensions(extensions: Optional[Iterable[str]]) -> List[str]:
+    """Return a de-duplicated, lowercase list of extensions, each with a leading dot."""
+    if not extensions:
+        return list(DEFAULT_VIDEO_EXTENSIONS)
+    seen: List[str] = []
+    for ext in extensions:
+        if not ext:
+            continue
+        e = ext.strip().lower()
+        if not e.startswith("."):
+            e = "." + e
+        if e not in seen:
+            seen.append(e)
+    return seen or list(DEFAULT_VIDEO_EXTENSIONS)
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    """Return ``numerator / denominator * 100`` or ``0.0`` when denominator is 0."""
+    try:
+        d = float(denominator)
+    except (TypeError, ValueError):
+        return 0.0
+    if d <= 0:
+        return 0.0
+    return float(numerator) / d * 100.0
 
 
 def create_video_list_from_directory(
@@ -19,20 +51,23 @@ def create_video_list_from_directory(
     recursive: bool = True,
     include_priority: bool = False
 ):
-    """Create a video list file from a directory of videos."""
-    if extensions is None:
-        extensions = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v', '.flv', '.wmv']
-    
+    """Create a video list file from a directory of videos.
+
+    Matching is case-insensitive (so ``.MP4`` and ``.mp4`` both match) and the
+    resulting list is de-duplicated and sorted for stable output.
+    """
     directory = Path(directory)
     if not directory.exists():
         raise FileNotFoundError(f"Directory not found: {directory}")
-    
-    pattern = "**/*" if recursive else "*"
-    video_files = []
-    
-    for ext in extensions:
-        for video_file in directory.glob(f"{pattern}{ext}"):
-            video_files.append(video_file)
+
+    normalized_exts = _normalize_extensions(extensions)
+    iterator = directory.rglob("*") if recursive else directory.glob("*")
+
+    matched: set = set()
+    for path in iterator:
+        if path.is_file() and path.suffix.lower() in normalized_exts:
+            matched.add(path)
+    video_files = sorted(matched)
     
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write("# Video list generated from directory\n")
@@ -40,7 +75,7 @@ def create_video_list_from_directory(
         f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"# Total videos: {len(video_files)}\n\n")
         
-        for video_file in sorted(video_files):
+        for video_file in video_files:
             if include_priority:
                 f.write(f"0:{video_file}\n")  # Default priority 0
             else:
@@ -79,7 +114,8 @@ def analyze_batch_results(results_file: Path) -> Dict[str, Any]:
     
     # Calculate additional statistics
     total_duration = sum(item.get('duration_seconds', 0) for item in items if item.get('status') == 'completed')
-    avg_duration = total_duration / summary.get('completed', 1) if summary.get('completed', 0) > 0 else 0
+    completed_count = summary.get('completed', 0) or 0
+    avg_duration = total_duration / completed_count if completed_count > 0 else 0.0
     
     # Group by status
     status_counts = {}
@@ -94,7 +130,8 @@ def analyze_batch_results(results_file: Path) -> Dict[str, Any]:
         shortest = min(completed_items, key=lambda x: x.get('duration_seconds', 0))
     else:
         longest = shortest = None
-    
+
+    total_items = summary.get('total_items', 0) or len(items)
     analysis = {
         'summary': summary,
         'status_counts': status_counts,
@@ -102,8 +139,8 @@ def analyze_batch_results(results_file: Path) -> Dict[str, Any]:
         'average_processing_time': avg_duration,
         'longest_processing': longest,
         'shortest_processing': shortest,
-        'success_rate': summary.get('completed', 0) / summary.get('total_items', 1) * 100,
-        'failure_rate': summary.get('failed', 0) / summary.get('total_items', 1) * 100
+        'success_rate': _safe_ratio(completed_count, total_items),
+        'failure_rate': _safe_ratio(summary.get('failed', 0) or 0, total_items),
     }
     
     return analysis
@@ -141,7 +178,7 @@ def print_batch_summary(results_file: Path):
     
     print("\nStatus breakdown:")
     for status, count in analysis['status_counts'].items():
-        percentage = count / summary.get('total_items', 1) * 100
+        percentage = _safe_ratio(count, summary.get('total_items', 0) or sum(analysis['status_counts'].values()))
         print(f"  {status}: {count} ({percentage:.1f}%)")
     
     print("="*70)
@@ -243,7 +280,7 @@ def main():
     args = parser.parse_args()
     
     if args.command == 'create-list':
-        extensions = args.extensions or ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v', '.flv', '.wmv']
+        extensions = args.extensions or list(DEFAULT_VIDEO_EXTENSIONS)
         create_video_list_from_directory(
             Path(args.directory), 
             Path(args.output), 
