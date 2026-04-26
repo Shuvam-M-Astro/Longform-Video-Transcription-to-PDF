@@ -5,6 +5,7 @@ Command-line health check utility for video processing services.
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -13,20 +14,43 @@ from typing import Dict, Any
 from src.video_doc.health_checks import get_health_status, get_health_summary, get_service_health
 
 
+# ANSI color escape codes used for status output. They are toggled off via
+# ``--no-color`` or when ``NO_COLOR`` is set in the environment (see
+# https://no-color.org), or when stdout is not attached to a TTY.
+_RESET = "\033[0m"
+_STATUS_COLORS: Dict[str, str] = {
+    "HEALTHY": "\033[92m",   # Green
+    "DEGRADED": "\033[93m",  # Yellow
+    "UNHEALTHY": "\033[91m", # Red
+    "UNKNOWN": "\033[90m",   # Gray
+}
+
+_USE_COLOR: bool = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+def _set_color_enabled(enabled: bool) -> None:
+    """Toggle ANSI color output globally for this CLI."""
+    global _USE_COLOR
+    _USE_COLOR = bool(enabled)
+
+
+def _color_for(status: str) -> str:
+    if not _USE_COLOR:
+        return ""
+    return _STATUS_COLORS.get(status.upper(), "")
+
+
+def _reset() -> str:
+    return _RESET if _USE_COLOR else ""
+
+
 def print_health_status(data: Dict[str, Any], detailed: bool = False):
     """Print health status in a formatted way."""
-    
-    # Overall status with color coding
+
     status = data['status'].upper()
-    status_colors = {
-        'HEALTHY': '\033[92m',    # Green
-        'DEGRADED': '\033[93m',    # Yellow
-        'UNHEALTHY': '\033[91m',   # Red
-        'UNKNOWN': '\033[90m'      # Gray
-    }
-    reset_color = '\033[0m'
-    
-    color = status_colors.get(status, '')
+    color = _color_for(status)
+    reset_color = _reset()
+
     print(f"\n{color}=== SYSTEM HEALTH: {status} ==={reset_color}")
     print(f"Timestamp: {data['timestamp']}")
     print(f"Uptime: {format_uptime(data['uptime_seconds'])}")
@@ -45,7 +69,7 @@ def print_health_status(data: Dict[str, Any], detailed: bool = False):
         print("\n=== SERVICE STATUS ===")
         services = data.get('services', {})
         for service_name, service in services.items():
-            service_color = status_colors.get(service['status'].upper(), '')
+            service_color = _color_for(service['status'])
             print(f"\n{service_color}● {service_name}: {service['status'].upper()}{reset_color}")
             
             if service.get('error_message'):
@@ -67,18 +91,11 @@ def print_service_status(service_name: str, service_data: Dict[str, Any]):
     if service_data is None:
         print(f"Service '{service_name}' not found")
         return
-    
-    status_colors = {
-        'HEALTHY': '\033[92m',
-        'DEGRADED': '\033[93m',
-        'UNHEALTHY': '\033[91m',
-        'UNKNOWN': '\033[90m'
-    }
-    reset_color = '\033[0m'
-    
+
     status = service_data['status'].upper()
-    color = status_colors.get(status, '')
-    
+    color = _color_for(status)
+    reset_color = _reset()
+
     print(f"\n{color}=== {service_name.upper()} SERVICE STATUS ==={reset_color}")
     print(f"Status: {status}")
     print(f"Timestamp: {service_data['timestamp']}")
@@ -154,9 +171,15 @@ def main():
                        help='Watch mode refresh interval in seconds (default: 30)')
     parser.add_argument('--json', '-j', action='store_true',
                        help='Output in JSON format')
-    
+    parser.add_argument('--no-color', action='store_true',
+                       help='Disable ANSI color output (also honored via NO_COLOR env var)')
+
     args = parser.parse_args()
-    
+
+    if args.no_color or args.json:
+        # JSON output should never be colorized so it stays pipe-friendly.
+        _set_color_enabled(False)
+
     try:
         if args.service:
             # Check specific service
