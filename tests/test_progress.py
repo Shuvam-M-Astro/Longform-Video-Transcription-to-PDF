@@ -2,8 +2,15 @@
 Tests for progress tracking functionality.
 """
 
+import io
+import time
+
 import pytest
-from src.video_doc.progress import PipelineProgress, make_console_progress_printer
+from src.video_doc.progress import (
+    PipelineProgress,
+    _format_duration,
+    make_console_progress_printer,
+)
 from src.video_doc.frames import list_keyframe_files
 
 
@@ -119,3 +126,63 @@ class TestProgress:
         assert list_keyframe_files(frames_dir, "png") == [png_frame]
         assert list_keyframe_files(frames_dir, "jpeg") == [jpg_frame]
         assert list_keyframe_files(frames_dir) == [jpg_frame, png_frame, webp_frame]
+
+
+class TestProgressTiming:
+    """Elapsed/ETA helpers and TTY-aware printer."""
+
+    def test_elapsed_is_non_negative_and_monotonic(self):
+        progress = PipelineProgress()
+        first = progress.elapsed_seconds()
+        assert first >= 0.0
+        time.sleep(0.01)
+        assert progress.elapsed_seconds() >= first
+
+    def test_eta_is_none_until_progress_recorded(self):
+        progress = PipelineProgress()
+        assert progress.eta_seconds() is None
+        progress.start_step("Step", 50.0)
+        # No progress within step yet -> still None.
+        assert progress.eta_seconds() is None
+
+    def test_eta_returns_positive_value_after_progress(self):
+        progress = PipelineProgress()
+        progress.start_step("Step", 100.0)
+        time.sleep(0.02)
+        progress.update(50.0)
+        eta = progress.eta_seconds()
+        assert eta is not None
+        assert eta > 0.0
+
+    def test_eta_is_none_when_complete(self):
+        progress = PipelineProgress()
+        progress.start_step("Step", 100.0)
+        progress.update(100.0)
+        progress.end_step()
+        assert progress.eta_seconds() is None
+
+    def test_format_duration_handles_none_and_hours(self):
+        assert _format_duration(None) == "--:--"
+        assert _format_duration(0) == "00:00"
+        assert _format_duration(65) == "01:05"
+        assert _format_duration(3725) == "1:02:05"
+
+    def test_non_tty_printer_writes_one_line_per_call(self):
+        buf = io.StringIO()
+        # StringIO has no isatty -> treated as non-TTY.
+        printer = make_console_progress_printer(stream=buf)
+        printer(10.0, "Step A")
+        printer(20.0, "Step B")
+        lines = [ln for ln in buf.getvalue().splitlines() if ln]
+        assert len(lines) == 2
+        assert "10.00%" in lines[0]
+        assert "Step B" in lines[1]
+
+    def test_printer_includes_elapsed_when_progress_provided(self):
+        buf = io.StringIO()
+        progress = PipelineProgress()
+        printer = make_console_progress_printer(stream=buf, progress=progress)
+        printer(0.0, "Idle")
+        out = buf.getvalue()
+        assert "elapsed" in out
+        assert "ETA" in out
