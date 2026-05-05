@@ -4,6 +4,7 @@ import os
 import shutil
 import threading
 import uuid
+import logging
 from pathlib import Path
 
 from src.video_doc import __version__
@@ -113,6 +114,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logger = logging.getLogger("video-doc")
+
     args = parse_args()
     # Pipeline mode: transcribe-only (default) or full (compat flag supported)
     args.transcribe_only = args.transcribe_only or (args.pipeline_mode == "transcribe-only")
@@ -122,7 +131,7 @@ def main() -> None:
     output_dir = Path(args.out)
     # Clean output directory before running, unless resume is requested
     if output_dir.exists() and not getattr(args, "resume", False):
-        print(f"Cleaning output directory: {output_dir}", flush=True)
+        logger.info(f"Cleaning output directory: {output_dir}")
         shutil.rmtree(output_dir, ignore_errors=True)
     ensure_dirs(output_dir)
 
@@ -205,10 +214,9 @@ def main() -> None:
     classified_dir = output_dir / "classified"
     snippets_dir = output_dir / "snippets" / "code"
 
-    print(
+    logger.info(
         f"Mode: {'streaming' if args.streaming else ('local-file' if getattr(args, 'video', None) else 'download')}; "
-        f"transcribe_only={args.transcribe_only}",
-        flush=True,
+        f"transcribe_only={args.transcribe_only}"
     )
 
     # Overall pipeline progress (weights roughly proportional to average time)
@@ -219,7 +227,7 @@ def main() -> None:
     keyframe_paths = []
 
     if args.streaming:
-        print("Resolving stream URLs...", flush=True)
+        logger.info("Resolving stream URLs...")
         resolved = resolve_stream_urls(
             args.url,
             cookies_from_browser=args.cookies_from_browser,
@@ -231,13 +239,13 @@ def main() -> None:
         try:
             if not resolved.get("audio_url"):
                 raise RuntimeError("No audio_url")
-            print("Extracting audio from stream...", flush=True)
+            logger.info("Extracting audio from stream...")
             progress.start_step("Audio (stream)", 10)
             stream_extract_audio(resolved["audio_url"], audio_path, headers=resolved.get("headers"), progress_cb=lambda p: progress.update(p))
             progress.end_step()
-            print(f"Audio saved: {audio_path}", flush=True)
+            logger.info(f"Audio saved: {audio_path}")
         except Exception:
-            print("Stream audio failed; falling back to yt-dlp audio-only...", flush=True)
+            logger.warning("Stream audio failed; falling back to yt-dlp audio-only...")
             progress.start_step("Audio fallback download", 10)
             audio_path = fallback_download_audio_via_ytdlp(
                 args.url,
@@ -248,13 +256,13 @@ def main() -> None:
                 use_android_client=args.use_android_client,
             )
             progress.end_step()
-            print(f"Audio saved (fallback): {audio_path}", flush=True)
+            logger.info(f"Audio saved (fallback): {audio_path}")
         # Frames (skip if transcribe-only)
         if not args.transcribe_only:
             try:
                 if not resolved.get("video_url"):
                     raise RuntimeError("No video_url")
-                print("Extracting keyframes from stream...", flush=True)
+                logger.info("Extracting keyframes from stream...")
                 progress.start_step("Keyframes (stream)", 20)
                 keyframe_paths = stream_extract_keyframes(
                     resolved["video_url"],
@@ -269,9 +277,9 @@ def main() -> None:
                     progress_cb=lambda p: progress.update(p),
                 )
                 progress.end_step()
-                print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
+                logger.info(f"Keyframes saved: {len(keyframe_paths)}")
             except Exception:
-                print("Stream keyframes failed; downloading tiny MP4 for keyframes...", flush=True)
+                logger.warning("Stream keyframes failed; downloading tiny MP4 for keyframes...")
                 small_video = output_dir / "video_small.mp4"
                 progress.start_step("Download tiny video", 10)
                 fallback_download_small_video(
@@ -283,7 +291,7 @@ def main() -> None:
                     use_android_client=args.use_android_client,
                 )
                 progress.end_step()
-                print("Extracting keyframes from tiny MP4...", flush=True)
+                logger.info("Extracting keyframes from tiny MP4...")
                 progress.start_step("Keyframes (tiny)", 20)
                 keyframe_paths = extract_keyframes(
                     video_path=small_video,
@@ -295,15 +303,15 @@ def main() -> None:
                     progress_cb=lambda p: progress.update(p),
                 )
                 progress.end_step()
-                print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
+                logger.info(f"Keyframes saved: {len(keyframe_paths)}")
     else:
         if getattr(args, "video", None):
-            print(f"Using local video file: {video_path}", flush=True)
+            logger.info(f"Using local video file: {video_path}")
         else:
             if not args.skip_download and video_path.exists() and getattr(args, "resume", False):
-                print(f"Reusing existing video: {video_path}", flush=True)
+                logger.info(f"Reusing existing video: {video_path}")
             elif not args.skip_download or not video_path.exists():
-                print("Downloading full video (mp4)...", flush=True)
+                logger.info("Downloading full video (mp4)...")
                 progress.start_step("Download video", 20)
                 download_video(
                     args.url,
@@ -316,9 +324,9 @@ def main() -> None:
                 )
                 progress.end_step()
         if audio_path.exists() and getattr(args, "resume", False):
-            print(f"Reusing existing audio: {audio_path}", flush=True)
+            logger.info(f"Reusing existing audio: {audio_path}")
         else:
-            print("Extracting audio from file...", flush=True)
+            logger.info("Extracting audio from file...")
             progress.start_step("Extract audio", 10)
             extract_audio_wav(
                 video_path,
@@ -329,18 +337,17 @@ def main() -> None:
                 volume_gain_db=args.volume_gain,
             )
             progress.end_step()
-            print(f"Audio saved: {audio_path}", flush=True)
+            logger.info(f"Audio saved: {audio_path}")
         if not args.transcribe_only:
-            print("Extracting keyframes from file...", flush=True)
-            print(
+            logger.info("Extracting keyframes from file...")
+            logger.info(
                 f"  - method={args.kf_method} max_fps={args.max_fps} "
-                f"min_scene_diff={args.min_scene_diff} interval_sec={args.kf_interval_sec}",
-                flush=True,
+                f"min_scene_diff={args.min_scene_diff} interval_sec={args.kf_interval_sec}"
             )
             existing_frames = list_keyframe_files(frames_dir, args.frame_format)
             if existing_frames and getattr(args, "resume", False):
                 keyframe_paths = existing_frames
-                print(f"Reusing existing keyframes: {len(keyframe_paths)}", flush=True)
+                logger.info(f"Reusing existing keyframes: {len(keyframe_paths)}")
             else:
                 progress.start_step("Keyframes", 20)
                 keyframe_paths = extract_keyframes(
@@ -362,14 +369,14 @@ def main() -> None:
                     progress_cb=lambda p: progress.update(p),
                 )
                 progress.end_step()
-                print(f"Keyframes saved: {len(keyframe_paths)}", flush=True)
+                logger.info(f"Keyframes saved: {len(keyframe_paths)}")
             # Contact sheet
             if args.contact_sheet and keyframe_paths:
-                print("Building contact sheet...", flush=True)
+                logger.info("Building contact sheet...")
                 cs_path = frames_dir.parent / "contact_sheet.jpg"
                 try:
                     if cs_path.exists() and getattr(args, "resume", False):
-                        print(f"Reusing existing contact sheet: {cs_path}", flush=True)
+                        logger.info(f"Reusing existing contact sheet: {cs_path}")
                     else:
                         build_contact_sheet(
                             image_paths=keyframe_paths,
@@ -380,15 +387,15 @@ def main() -> None:
                             title=(args.cs_title or video_title),
                             title_height=args.cs_title_height,
                         )
-                        print(f"Contact sheet saved: {cs_path}", flush=True)
+                        logger.info(f"Contact sheet saved: {cs_path}")
                 except Exception as e:
-                    print(f"Contact sheet failed: {e}", flush=True)
+                    logger.warning(f"Contact sheet failed: {e}")
 
     transcript_txt = transcript_dir / "transcript.txt"
     segments_json = transcript_dir / "segments.json"
     srt_path = transcript_dir / "transcript.srt" if args.export_srt else None
     if getattr(args, "resume", False) and transcript_txt.exists() and segments_json.exists() and (not args.export_srt or (srt_path and srt_path.exists())):
-        print("Reusing existing transcript artifacts", flush=True)
+        logger.info("Reusing existing transcript artifacts")
         try:
             with open(segments_json, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -399,7 +406,7 @@ def main() -> None:
         except Exception:
             segments = []
     else:
-        print(f"Transcribing audio with model={args.whisper_model}, beam_size={args.beam_size}...", flush=True)
+        logger.info(f"Transcribing audio with model={args.whisper_model}, beam_size={args.beam_size}...")
         progress.start_step("Transcribe", 40)
         segments = transcribe_audio(
             audio_path=audio_path,
@@ -414,12 +421,12 @@ def main() -> None:
             srt_path=srt_path,
         )
         progress.end_step()
-        print(f"Transcription done: {len(segments)} segments", flush=True)
+        logger.info(f"Transcription done: {len(segments)} segments")
 
     if args.transcribe_only:
         classification_result = {"code": [], "plots": [], "images": []}
     else:
-        print("Classifying frames...", flush=True)
+        logger.info("Classifying frames...")
         manifest_path = classified_dir / "classification_result.json"
         if getattr(args, "resume", False) and manifest_path.exists():
             try:
@@ -428,7 +435,7 @@ def main() -> None:
                 # Normalize to lists of Paths
                 for k in ("code", "plots", "images"):
                     classification_result[k] = [Path(p) for p in classification_result.get(k, [])]
-                print("Reusing existing classification manifest", flush=True)
+                logger.info("Reusing existing classification manifest")
             except Exception:
                 classification_result = {"code": [], "plots": [], "images": []}
         else:
@@ -450,14 +457,13 @@ def main() -> None:
                     json.dump({k: [str(p) for p in v] for k, v in classification_result.items()}, f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
-            print(
+            logger.info(
                 f"Classified - code: {len(classification_result.get('code', []))}, "
                 f"plots: {len(classification_result.get('plots', []))}, "
-                f"images: {len(classification_result.get('images', []))}",
-                flush=True,
+                f"images: {len(classification_result.get('images', []))}"
             )
 
-    print("Building PDF report...", flush=True)
+    logger.info("Building PDF report...")
     progress.start_step("Build PDF", 5)
     report_pdf_path = output_dir / "report.pdf"
     # Optionally detect contact sheet path to embed later
@@ -469,7 +475,7 @@ def main() -> None:
         contact_sheet_path = None
 
     if getattr(args, "resume", False) and report_pdf_path.exists():
-        print(f"Reusing existing report: {report_pdf_path}", flush=True)
+        logger.info(f"Reusing existing report: {report_pdf_path}")
         progress.update(100.0)
         progress.end_step()
     else:
@@ -485,7 +491,7 @@ def main() -> None:
             contact_sheet_path=contact_sheet_path,
         )
         progress.end_step()
-        print(f"Report ready: {report_pdf_path}", flush=True)
+        logger.info(f"Report ready: {report_pdf_path}")
 
     # Automatically index transcript for search (async, non-blocking)
     def index_transcript_in_background():
@@ -504,22 +510,22 @@ def main() -> None:
                 segments_json_path=segments_json
             )
             if success:
-                print(f"✓ Transcript indexed for search (job_id: {job_id[:8]}...)", flush=True)
+                logger.info(f"✓ Transcript indexed for search (job_id: {job_id[:8]}...)")
             else:
-                print("⚠ Failed to index transcript for search", flush=True)
+                logger.warning("⚠ Failed to index transcript for search")
         except ImportError:
             # Search dependencies not available, skip indexing
             pass
         except Exception as e:
             # Don't fail the main process if indexing fails
-            print(f"⚠ Could not index transcript for search: {e}", flush=True)
+            logger.warning(f"⚠ Could not index transcript for search: {e}")
     
     # Start indexing in background thread
     index_thread = threading.Thread(target=index_transcript_in_background, daemon=True)
     index_thread.start()
-    print("→ Started background indexing for search...", flush=True)
+    logger.info("→ Started background indexing for search...")
 
-    print(json.dumps({
+    logger.info(json.dumps({
         "audio": str(audio_path),
         "transcript_txt": str(transcript_txt),
         "segments_json": str(segments_json),
