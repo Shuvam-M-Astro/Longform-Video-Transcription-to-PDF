@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import pydantic
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -61,23 +61,25 @@ class VideoConfig(BaseModel):
     """Video processing configuration validation."""
     url: Optional[str] = None
     video_path: Optional[str] = None
-    language: str = Field(default="auto", regex=r"^[a-z]{2}$|^auto$")
-    whisper_model: str = Field(default="medium", regex=r"^(tiny|base|small|medium|large|large-v2|large-v3)$")
+    language: str = Field(default="auto", pattern=r"^[a-z]{2}$|^auto$")
+    whisper_model: str = Field(default="medium", pattern=r"^(tiny|base|small|medium|large|large-v2|large-v3)$")
     beam_size: int = Field(default=5, ge=1, le=10)
     transcribe_only: bool = False
     streaming: bool = False
-    kf_method: str = Field(default="scene", regex=r"^(scene|iframe|interval)$")
+    kf_method: str = Field(default="scene", pattern=r"^(scene|iframe|interval)$")
     max_fps: float = Field(default=1.0, gt=0, le=10.0)
     min_scene_diff: float = Field(default=0.45, ge=0.0, le=1.0)
-    report_style: str = Field(default="book", regex=r"^(minimal|book)$")
+    report_style: str = Field(default="book", pattern=r"^(minimal|book)$")
     
-    @validator('url')
+    @field_validator('url')
+    @classmethod
     def validate_url(cls, v):
         if v and not v.startswith(('http://', 'https://')):
             raise ValueError('URL must start with http:// or https://')
         return v
     
-    @validator('video_path')
+    @field_validator('video_path')
+    @classmethod
     def validate_video_path(cls, v):
         if v and not Path(v).exists():
             raise ValueError('Video file does not exist')
@@ -93,7 +95,8 @@ class AudioQualityMetrics(BaseModel):
     file_size: int = Field(gt=0)
     format: str
     
-    @validator('sample_rate')
+    @field_validator('sample_rate')
+    @classmethod
     def validate_sample_rate(cls, v):
         if v not in [8000, 16000, 22050, 44100, 48000]:
             raise ValueError('Unsupported sample rate')
@@ -111,7 +114,8 @@ class VideoQualityMetrics(BaseModel):
     format: str
     codec: str
     
-    @validator('width', 'height')
+    @field_validator('width', 'height')
+    @classmethod
     def validate_dimensions(cls, v):
         if v < 32 or v > 7680:  # 8K resolution limit
             raise ValueError('Invalid video dimensions')
@@ -138,8 +142,8 @@ class BaseValidator:
         self.severity = severity
         self.logger = structlog.get_logger(__name__)
     
-    def validate(self, data: Any, context: Optional[Dict[str, Any]] = None) -> ValidationResult:
-        """Validate data and return result."""
+    def validate(self, data: Any, context: Optional[Dict[str, Any]] = None) -> List[ValidationResult]:
+        """Validate data and return list of results."""
         raise NotImplementedError
     
     def _create_result(
