@@ -244,21 +244,26 @@ class AudioValidator(BaseValidator):
         audio_path = Path(audio_path)
         
         try:
-            # Use OpenCV to get audio properties
-            cap = cv2.VideoCapture(str(audio_path))
+            import wave
             
-            if not cap.isOpened():
-                results.append(self._create_result(
-                    ValidationStatus.FAILED,
-                    "Cannot open audio file",
-                    metadata={"file_path": str(audio_path)}
-                ))
-                return results
-            
-            # Get audio properties
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            duration = frame_count / fps if fps > 0 else 0
+            try:
+                with wave.open(str(audio_path), 'rb') as wav:
+                    frames = wav.getnframes()
+                    rate = wav.getframerate()
+                    duration = frames / float(rate) if rate > 0 else 0
+            except Exception as e:
+                import ffmpeg
+                # Fallback to ffmpeg probe if not a local standard wav
+                try:
+                    info = ffmpeg.probe(str(audio_path))
+                    duration = float(info['format']['duration'])
+                except Exception as ef:
+                    results.append(self._create_result(
+                        ValidationStatus.FAILED,
+                        f"Cannot open audio file: {e}",
+                        metadata={"file_path": str(audio_path)}
+                    ))
+                    return results
             
             # Validate duration
             min_duration = context.get('min_duration', 1.0) if context else 1.0
@@ -291,8 +296,6 @@ class AudioValidator(BaseValidator):
                     metadata={"file_path": str(audio_path)}
                 ))
             
-            cap.release()
-            
         except Exception as e:
             results.append(self._create_result(
                 ValidationStatus.FAILED,
@@ -305,32 +308,39 @@ class AudioValidator(BaseValidator):
     def _detect_silence(self, audio_path: Path, threshold: float) -> bool:
         """Detect if audio is mostly silent."""
         try:
-            # Simple silence detection using OpenCV
-            cap = cv2.VideoCapture(str(audio_path))
-            if not cap.isOpened():
-                return True
-            
-            # Sample frames for analysis
-            sample_frames = 100
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            step = max(1, frame_count // sample_frames)
-            
-            silent_frames = 0
-            total_frames = 0
-            
-            for i in range(0, frame_count, step):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                ret, frame = cap.read()
-                if ret:
-                    # Convert to grayscale and calculate mean
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    mean_intensity = np.mean(gray)
-                    if mean_intensity < threshold * 255:
-                        silent_frames += 1
-                    total_frames += 1
-            
-            cap.release()
-            return total_frames > 0 and (silent_frames / total_frames) > 0.8
+            import wave
+            import numpy as np
+            with wave.open(str(audio_path), 'rb') as wav:
+                frames = wav.getnframes()
+                sample_width = wav.getsampwidth()
+                if sample_width not in (1, 2, 4) or frames == 0:
+                    return False
+                
+                # Sample chunks for analysis
+                num_chunks = 100
+                chunk_frames = min(2048, frames)
+                step = max(1, frames // num_chunks)
+                
+                silent_chunks = 0
+                total_chunks = 0
+                
+                for i in range(num_chunks):
+                    pos = i * step
+                    if pos >= frames:
+                        break
+                    wav.setpos(pos)
+                    raw_data = wav.readframes(chunk_frames)
+                    if not raw_data:
+                        break
+                    
+                    data = np.frombuffer(raw_data, dtype=f'int{sample_width*8}')
+                    amplitude = np.max(np.abs(data)) / (2**(8*sample_width - 1))
+                    
+                    if amplitude < threshold:
+                        silent_chunks += 1
+                    total_chunks += 1
+                    
+            return total_chunks > 0 and (silent_chunks / total_chunks) > 0.8
             
         except Exception:
             return False
